@@ -628,6 +628,33 @@ public class ModBehaviourF : MonoBehaviour
                     break;
                 }
 
+            case Op.REMOTE_CREATE:
+                {
+                    if (IsServer) break; // 只客户端处理
+                    var id = reader.GetString();
+                    var sid = reader.GetString();
+                    var pos = reader.GetVector3();
+                    var rot = reader.GetQuaternion();
+                    var face = reader.GetString();
+
+                    if (string.IsNullOrEmpty(sid) ||
+                        !(SceneNet.SceneIdsMatch(sid, MultiSceneCore.MainSceneID) ||
+                          SceneNet.SceneIdsMatch(sid, MultiSceneCore.ActiveSubSceneID)))
+                        break;
+
+                    if (clientRemoteCharacters.TryGetValue(id, out var go) && go)
+                    {
+                        go.transform.position = pos;
+                        var cmc = go.GetComponent<CharacterMainControl>();
+                        if (cmc != null && cmc.modelRoot != null) cmc.modelRoot.rotation = rot;
+                    }
+                    else
+                    {
+                        CreateRemoteCharacter.CreateRemoteCharacterForClient(id, pos, rot, face).Forget();
+                    }
+                    break;
+                }
+
 
             case Op.DOOR_REQ_SET:
                 {
