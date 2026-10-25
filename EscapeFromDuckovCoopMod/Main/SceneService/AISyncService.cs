@@ -1967,6 +1967,24 @@ public sealed partial class AISyncService
             : null;
     }
 
+    /// <summary>
+    /// AI 的枪线/枪口特效只能发给真正拥有该 AI 克隆的客机。
+    /// 否则客机会先看到“有枪线没有人”，等 spawn 包到了才出现模型。
+    /// </summary>
+    public bool Server_ShouldSendAiFireEvent(NetPeer peer, int id)
+    {
+        if (!IsServer || peer == null) return false;
+        if (!CoopSyncDatabase.AI.TryGet(id, out var entry) || entry == null)
+            return false;
+
+        // 原生区域/载具由客户端本地生成或强制保留，交给客户端侧的存在性检查。
+        if (HasNativeArea(entry.CharacterPresetKey) || entry.IsVehicle)
+            return true;
+
+        var watchers = GetServerWatchers(id);
+        return watchers != null && watchers.Contains(peer);
+    }
+
     private HashSet<NetPeer> GetServerWatchersInRange(AISyncEntry entry, float range)
     {
         var watchers = GetServerWatchers(entry.Id);
