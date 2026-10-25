@@ -135,6 +135,8 @@ internal static class SharedHomeLoadouts
             }
             else if (kind == 6 && Players.TryGetValue(sender, out var key))
             {
+                // Identical reports were already validated; avoid parsing the full tree twice.
+                if (LastReports.TryGetValue(sender, out var previous) && previous.SequenceEqual(bytes)) return;
                 // Validate the native tree before retaining the report in the host save.
                 var report = new ES3File(bytes);
                 var context = report.Load<string>("context");
@@ -143,7 +145,6 @@ internal static class SharedHomeLoadouts
                 if (tree?.entries == null || tree.entries.Count == 0 || tree.entries.Count > 10000) return;
                 var created = NewPlayers.Contains(sender);
                 if (created && (!report.Load<bool>("created") || !report.KeyExists("face"))) return;
-                if (LastReports.TryGetValue(sender, out var previous) && previous.SequenceEqual(bytes)) return;
                 var firstReport = !LastReports.ContainsKey(sender);
                 LastReports[sender] = bytes;
                 SavesSystem.Save(ContextKey(key, context), bytes);
@@ -152,7 +153,7 @@ internal static class SharedHomeLoadouts
                 foreach (var deathKey in DeathKeys)
                     if (report.KeyExists(deathKey)) deaths.Save(deathKey, report.Load(deathKey));
                 if (deaths.GetKeys().Length > 0) SavesSystem.Save(key + "/Deaths", deaths.LoadRawBytes());
-                SharedHome.MarkDirty();
+                SharedHome.MarkSaveDirty();
                 if (created)
                 {
                     SavesSystem.Save(key + "/Created", true);

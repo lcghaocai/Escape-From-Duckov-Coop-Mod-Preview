@@ -49,6 +49,7 @@ internal static class SharedHomeStorageOperations
         var token = (string)args["token"];
         if (string.IsNullOrEmpty(token) || token.Length > 64) return;
         var inventory = PlayerStorage.Inventory;
+        var completed = false;
         try
         {
             var position = (int)args["position"];
@@ -83,15 +84,18 @@ internal static class SharedHomeStorageOperations
                     item.GetComponent<ItemSetting_Gun>()?.TakeOutAllBullets();
                     COOPManager.LootNet.Server_BroadcastHostSlotChange(inventory, position);
                     break;
+                default: return;
             }
+            completed = true;
         }
         finally
         {
-            // Release the guest's operation lock and refresh even when its view was stale.
-            // A throw here must not swallow the reply, otherwise the guest's token stays pending forever.
+            // Successful edits already produce slot deltas. A rejected/stale edit
+            // still needs an authoritative snapshot, and every path releases the token.
             try
             {
-                if (inventory) COOPManager.LootNet.Server_SendLootboxState(peer, inventory);
+                if (completed) COOPManager.LootNet.Server_FlushWarehouseChanges();
+                else if (inventory) COOPManager.LootNet.Server_SendLootboxState(peer, inventory);
             }
             catch (Exception e)
             {

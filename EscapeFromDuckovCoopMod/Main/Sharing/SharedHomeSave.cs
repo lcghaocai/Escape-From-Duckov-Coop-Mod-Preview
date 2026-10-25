@@ -32,6 +32,14 @@ internal static class SharedHomeSave
         key.StartsWith("ConstructionSite_") || key.StartsWith("NoteIndex") || SharedHomeWorld.ValueKey(key);
 
     internal static void ResetPublished() => PublishedValues.Clear();
+    internal static void CollectForPersistence()
+    {
+        var previous = Capturing;
+        Capturing = true;
+        try { SavesSystem.CollectSaveData(); }
+        finally { Capturing = previous; }
+    }
+
     internal static byte[] Capture(bool full = false)
     {
         Capturing = true;

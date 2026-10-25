@@ -58,7 +58,7 @@ internal static class LootViewPatch
                 itemsEachPage(display) = 50;
 
             // 大仓库只渲染当前页，避免一次创建/布局 700 个槽位。
-            display.SetPage(Mathf.Clamp(display.SelectedPage, 0, display.MaxPage));
+            display.SetPage(Mathf.Clamp(display.SelectedPage, 0, Mathf.Max(0, display.MaxPage - 1)));
         }
         catch (Exception e)
         {

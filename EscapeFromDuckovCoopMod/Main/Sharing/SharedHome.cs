@@ -13,6 +13,7 @@ public static class SharedHome
     private static bool _remoteEnabled;
     private static bool _initialized;
     private static bool _dirty;
+    private static bool _saveDirty;
     private static float _nextUpdate;
     private static float _nextSave;
     private static readonly Dictionary<NetPeer, long> Requests = new();
@@ -98,6 +99,7 @@ public static class SharedHome
         SharedHomeSave.Restore();
         _session = null;
         _dirty = false;
+        _saveDirty = false;
         Requests.Clear();
         NeedsFull.Clear();
         SharedHomeCompatibility.Reset();
@@ -106,7 +108,13 @@ public static class SharedHome
     }
     public static void MarkDirty()
     {
-        if (Active && NetService.Instance.IsServer) _dirty = true;
+        if (!Active || !NetService.Instance.IsServer) return;
+        _dirty = true;
+        _saveDirty = true;
+    }
+    internal static void MarkSaveDirty()
+    {
+        if (Active && NetService.Instance.IsServer) _saveDirty = true;
     }
     public static void Tick()
     {
@@ -133,26 +141,34 @@ public static class SharedHome
         SharedHomeStorage.Ensure();
         if (!NetService.Instance.IsServer || Time.unscaledTime < _nextUpdate) return;
         _nextUpdate = Time.unscaledTime + .25f;
-        if (!_dirty) return;
-        _dirty = false;
-        if (NeedsFull.Count > 0)
+        var collected = false;
+        if (_dirty)
         {
-            var full = new SharedHomeRpc { Kind = 1, Session = _session, Revision = ++_revision, Data = SharedHomeSave.Capture(true) };
-            foreach (var peer in NeedsFull)
-                if (peer.ConnectionState == ConnectionState.Connected) CoopTool.SendRpcTo(peer, in full);
-            NeedsFull.Clear();
+            _dirty = false;
+            if (NeedsFull.Count > 0)
+            {
+                var full = new SharedHomeRpc { Kind = 1, Session = _session, Revision = ++_revision, Data = SharedHomeSave.Capture(true) };
+                foreach (var peer in NeedsFull)
+                    if (peer.ConnectionState == ConnectionState.Connected) CoopTool.SendRpcTo(peer, in full);
+                NeedsFull.Clear();
+            }
+            var data = SharedHomeSave.Capture();
+            collected = true;
+            if (data != null)
+            {
+                var message = new SharedHomeRpc { Kind = 1, Session = _session, Revision = ++_revision, Data = data };
+                foreach (var peer in NetService.Instance.netManager.ConnectedPeerList)
+                    if (SharedHomeCompatibility.Allows(peer)) CoopTool.SendRpcTo(peer, in message);
+            }
         }
-        var data = SharedHomeSave.Capture();
-        if (data != null)
+        if (_saveDirty && Time.unscaledTime >= _nextSave)
         {
-            var message = new SharedHomeRpc { Kind = 1, Session = _session, Revision = ++_revision, Data = data };
-            foreach (var peer in NetService.Instance.netManager.ConnectedPeerList)
-                if (SharedHomeCompatibility.Allows(peer)) CoopTool.SendRpcTo(peer, in message);
-        }
-        if (Time.unscaledTime >= _nextSave)
-        {
-            _nextSave = Time.unscaledTime + 5f;
+            // Live inventory updates use loot deltas. Collect the native save only
+            // when persisting it, even if no shared progress keys changed.
+            if (!collected) SharedHomeSave.CollectForPersistence();
             SavesSystem.SaveFile(false);
+            _saveDirty = false;
+            _nextSave = Time.unscaledTime + 5f;
         }
     }
     internal static void Apply(Action action)
@@ -215,16 +231,18 @@ public static class SharedHome
             if (Requests.TryGetValue(context.Sender, out var last) && message.Revision <= last) return;
             Requests[context.Sender] = message.Revision;
             var request = JObject.Parse(Encoding.UTF8.GetString(message.Data));
+            var action = (string)request["action"];
             try
             {
-                SharedHomeActions.Execute((string)request["action"], (JObject)request["arguments"], context.Sender);
+                SharedHomeActions.Execute(action, (JObject)request["arguments"], context.Sender);
             }
             catch (Exception e)
             {
                 // 单个共享操作异常不能打断后续请求处理；仓库操作自身会在 finally 里回包。
                 CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] action failed: {e}");
             }
-            MarkDirty();
+            if (action?.StartsWith("storage", StringComparison.Ordinal) == true) MarkSaveDirty();
+            else MarkDirty();
             return;
         }
         if (message.Kind == 0)

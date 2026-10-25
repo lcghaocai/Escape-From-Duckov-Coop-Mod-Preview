@@ -224,6 +224,27 @@ public static class CoopTool
         }
     }
 
+    internal static void SendRpcToPeers<T>(IEnumerable<NetPeer> targets, in T message)
+        where T : struct, IRpcMessage
+    {
+        if (Service?.IsServer != true) return;
+        var descriptor = RpcRegistry.GetDescriptor<T>();
+        if (descriptor.Direction == RpcDirection.ClientToServer) return;
+        var writer = RpcWriterPool.Rent();
+        try
+        {
+            writer.Put((byte)descriptor.Op);
+            message.Serialize(writer);
+            foreach (var target in targets)
+            {
+                if (target == null || target.ConnectionState != ConnectionState.Connected) continue;
+                target.Send(writer, descriptor.Delivery);
+                NetDiagnostics.Instance.RecordOutbound(descriptor.Op, Math.Max(0, writer.Length - 1));
+            }
+        }
+        finally { RpcWriterPool.Return(writer); }
+    }
+
     public static void SendBroadcastDiscovery()
     {
         if (IsServer) return;

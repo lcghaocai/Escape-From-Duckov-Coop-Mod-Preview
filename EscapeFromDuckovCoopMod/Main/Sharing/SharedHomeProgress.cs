@@ -23,7 +23,7 @@ internal static class SharedHomeProgress
         CraftingManager.OnFormulaUnlocked += _ => SharedHome.MarkDirty();
         BeaconManager.OnBeaconUnlocked += (_, _) => SharedHome.MarkDirty();
         BlackMarket.onRefreshChanceChanged += _ => SharedHome.MarkDirty();
-        PlayerStorage.OnPlayerStorageChange += (_, _, _) => SharedHome.MarkDirty();
+        PlayerStorage.OnPlayerStorageChange += (_, _, _) => SharedHome.MarkSaveDirty();
         PlayerStorage.OnTakeBufferItem += SharedHome.MarkDirty;
         PlayerStorage.OnItemAddedToBuffer += _ => SharedHome.MarkDirty();
         StockShop.OnItemPurchased += (_, item) => SharedHomeCommerce.StoreOutput(item);
