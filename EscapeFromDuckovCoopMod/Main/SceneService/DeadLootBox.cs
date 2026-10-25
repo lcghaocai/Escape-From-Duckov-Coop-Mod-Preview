@@ -26,8 +26,12 @@ namespace EscapeFromDuckovCoopMod;
 public class DeadLootBox : MonoBehaviour
 {
     public static DeadLootBox Instance;
+    private static readonly Action<InteractableLootbox> CreateLocalInventory =
+        (Action<InteractableLootbox>)HarmonyLib.AccessTools.Method(typeof(InteractableLootbox), "CreateLocalInventory")
+            .CreateDelegate(typeof(Action<InteractableLootbox>));
 
     private readonly Dictionary<string, GameObject> _prefabCache = new();
+    private bool _prefabsIndexed;
     private readonly Dictionary<InteractableLootbox, DeadLootSpawnRpc> _serverSpawns = new();
 
     private NetService Service => NetService.Instance;
@@ -55,11 +59,14 @@ public class DeadLootBox : MonoBehaviour
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
         _prefabCache.Clear();
+        _prefabsIndexed = false;
     }
 
     public void SpawnDeadLootboxAt(int lootUid, Vector3 pos, Quaternion rot, bool useTombPrefab, string prefabName, string playerId = null)
     {
         if (CoopSyncDatabase.Loot.TryGetByLootUid(lootUid, out var existing) && existing.Inventory) return;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        double resolveMs = 0, instantiateMs = 0;
         try
         {
             var prefab = ResolveDeadLootPrefab(prefabName, useTombPrefab);
@@ -69,10 +76,15 @@ public class DeadLootBox : MonoBehaviour
                 return;
             }
 
+            resolveMs = timer.Elapsed.TotalMilliseconds;
             var go = Instantiate(prefab, pos, rot);
+            instantiateMs = timer.Elapsed.TotalMilliseconds - resolveMs;
             var box = go ? go.GetComponent<InteractableLootbox>() : null;
             if (!box) return;
 
+            // Native corpse creation also uses a fresh local inventory. Never inherit
+            // a scene instance inventory or collide with a rounded position key.
+            CreateLocalInventory(box);
             var inv = box.Inventory;
             if (!inv)
             {
@@ -114,6 +126,11 @@ public class DeadLootBox : MonoBehaviour
         {
             Debug.LogError("[LOOT] SpawnDeadLootboxAt failed: " + e);
         }
+        finally
+        {
+            var total = timer.Elapsed.TotalMilliseconds;
+            if (total >= 4) CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] corpseSpawn uid={lootUid} resolveMs={resolveMs:0.0} instantiateMs={instantiateMs:0.0} setupMs={total-resolveMs-instantiateMs:0.0} totalMs={total:0.0}");
+        }
     }
 
 
@@ -126,71 +143,28 @@ public class DeadLootBox : MonoBehaviour
         if (!string.IsNullOrEmpty(normalized) && _prefabCache.TryGetValue(normalized, out var cached) && cached)
             return cached;
 
-        GameObject resolved = null;
-        if (!string.IsNullOrEmpty(normalized))
-        {
-            resolved = FindDeadLootPrefabInScene(normalized) ?? FindDeadLootPrefabInResources(normalized);
-            if (resolved)
-                _prefabCache[normalized] = resolved;
-        }
+        var fallback = GetDeadLootPrefabOnClient();
+        if (string.IsNullOrEmpty(normalized) || (fallback && NormalizePrefabName(fallback.name) == normalized))
+            return fallback;
 
-        return resolved ? resolved : GetDeadLootPrefabOnClient();
+        // Restrict the cold lookup to lootbox prefab assets. Cloning a live corpse
+        // can duplicate its contents and carries unrelated runtime components.
+        if (!_prefabsIndexed)
+        {
+            foreach (var box in Resources.FindObjectsOfTypeAll<InteractableLootbox>())
+                if (box && !box.gameObject.scene.IsValid())
+                    _prefabCache[NormalizePrefabName(box.name)] = box.gameObject;
+            _prefabsIndexed = true;
+        }
+        if (_prefabCache.TryGetValue(normalized, out cached) && cached) return cached;
+        var loaded = Resources.Load<GameObject>(normalized);
+        var resolved = loaded && loaded.GetComponent<InteractableLootbox>() && !loaded.scene.IsValid() ? loaded : fallback;
+        if (resolved) _prefabCache[normalized] = resolved;
+        return resolved;
     }
 
-    private static string NormalizePrefabName(string prefabName)
-    {
-        if (string.IsNullOrEmpty(prefabName))
-            return string.Empty;
-
-        return prefabName.Replace("(Clone)", string.Empty, StringComparison.Ordinal).Trim();
-    }
-
-    private GameObject FindDeadLootPrefabInScene(string normalizedName)
-    {
-        try
-        {
-            var boxes = FindObjectsOfType<InteractableLootbox>(true);
-            foreach (var box in boxes)
-            {
-                var go = box ? box.gameObject : null;
-                if (go && string.Equals(NormalizePrefabName(go.name), normalizedName, StringComparison.Ordinal))
-                    return go;
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private GameObject FindDeadLootPrefabInResources(string normalizedName)
-    {
-        try
-        {
-            var all = Resources.FindObjectsOfTypeAll<GameObject>();
-            foreach (var go in all)
-            {
-                if (go && string.Equals(NormalizePrefabName(go.name), normalizedName, StringComparison.Ordinal))
-                    return go;
-            }
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            var loaded = Resources.Load<GameObject>(normalizedName);
-            if (loaded)
-                return loaded;
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
+    private static string NormalizePrefabName(string prefabName) =>
+        string.IsNullOrEmpty(prefabName) ? string.Empty : prefabName.Replace("(Clone)", string.Empty, StringComparison.Ordinal).Trim();
 
     private GameObject GetDeadLootPrefabOnClient()
     {

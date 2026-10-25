@@ -12,6 +12,9 @@ static partial class Program
 
     public static void Main()
     {
+        Test("take request/receipt/denial and legacy wire boundaries", LootTakeWire);
+        Test("transient audio expires, stays bounded and preserves transactions", TransientAudioQueue);
+        Test("take delivery handles replay, reentrancy, failure and delayed receipts", TakeDeliveryExactlyOnce);
         Test("receive diagnostics retain ownership and age across coalescing/reset", ReceiveDiagnostics);
         Test("per-peer pressure isolates clients and restores quality after recovery/timeout", PressureRecovery);
         Test("entity recovery limits burst, repeated IDs and reconnect state", RecoveryRateLimit);

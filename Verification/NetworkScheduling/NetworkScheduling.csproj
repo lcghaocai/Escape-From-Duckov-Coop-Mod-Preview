@@ -30,5 +30,8 @@
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Health/PlayerBuffSnapshotRpc.cs" Link="Production/PlayerBuffSnapshotRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/AISnapshotRequestRpc.cs" Link="Production/AISnapshotRequestRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/ReceivePressureRpc.cs" Link="Production/ReceivePressureRpc.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootIdentifier.cs" Link="Production/LootIdentifier.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootTakeRequestRpc.cs" Link="Production/LootTakeRequestRpc.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootTakeOkRpc.cs" Link="Production/LootTakeOkRpc.cs" />
   </ItemGroup>
 </Project>

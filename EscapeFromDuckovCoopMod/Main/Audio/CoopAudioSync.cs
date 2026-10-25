@@ -142,8 +142,8 @@ public static class CoopAudioSync
             return;
 
         var rpc = new AudioEventRpc { Payload = payload };
-        if (CoopCombatAudio.IsTransientGunshot(payload))
-            CoopTool.SendUnreliableRpc(in rpc);
+        if (CoopCombatAudio.IsTransientOneShot(payload))
+            CoopTransientAudio.Send(in rpc);
         else
             CoopTool.SendRpc(in rpc);
     }
@@ -238,6 +238,7 @@ public static class CoopAudioSync
 
     internal static void HandleIncoming(CoopAudioEventPayload payload)
     {
+        if (!CoopTransientAudio.AudibleLocally(payload.Position, CoopCombatAudio.AudibleRange(payload))) return;
         using (BeginSuppress())
         {
             var hasEmitter = payload.Kind == CoopAudioEventKind.ThreeD;

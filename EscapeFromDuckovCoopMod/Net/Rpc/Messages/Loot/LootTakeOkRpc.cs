@@ -11,6 +11,9 @@ public struct LootTakeOkRpc : IRpcMessage
     public int Slot;
     public int TypeId;
     public int Stack;
+    public bool Accepted;
+    public int Version;
+    public ItemSnapshot Item;
 
     public void Serialize(NetDataWriter writer)
     {
@@ -19,6 +22,8 @@ public struct LootTakeOkRpc : IRpcMessage
         writer.Put(Slot);
         writer.Put(TypeId);
         writer.Put(Stack);
+        writer.Put(Accepted); writer.Put(Version);
+        if (Accepted) ItemTool.WriteItemSnapshot(writer, Item);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -28,5 +33,8 @@ public struct LootTakeOkRpc : IRpcMessage
         Slot = reader.GetInt();
         TypeId = reader.GetInt();
         Stack = reader.GetInt();
+        if (reader.AvailableBytes == 0) return;
+        Accepted = reader.GetBool(); Version = reader.GetInt();
+        if (Accepted) Item = ItemTool.ReadItemSnapshot(reader);
     }
 }
