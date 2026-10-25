@@ -23,6 +23,8 @@ public struct ItemSnapshot
     public bool HasDurability;
     public float Durability;
     public int InventoryCapacity;
+    public bool HasInventory;
+    public bool HasSlots;
     public ItemInventoryEntrySnapshot[] Inventory;
     public ItemSlotSnapshot[] Slots;
     public string[] CustomDataKeys;

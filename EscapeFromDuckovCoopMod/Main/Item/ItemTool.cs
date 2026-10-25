@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -277,6 +277,7 @@ public static class ItemTool
         var inv = item.Inventory;
         if (inv != null)
         {
+            snap.HasInventory = true;
             snap.InventoryCapacity = inv.Capacity;
             if (inv.GetItemCount() > 0)
             {
@@ -298,23 +299,27 @@ public static class ItemTool
         }
 
         var slots = item.Slots;
-        if (slots != null && slots.Count > 0)
+        if (slots != null)
         {
-            var list = new List<ItemSlotSnapshot>(slots.Count);
-            foreach (var slot in slots)
+            snap.HasSlots = true;
+            if (slots.Count > 0)
             {
-                if (slot == null) continue;
-                var child = slot.Content;
-                var childSnap = new ItemSlotSnapshot
+                var list = new List<ItemSlotSnapshot>(slots.Count);
+                foreach (var slot in slots)
                 {
-                    Key = slot.Key ?? string.Empty,
-                    HasItem = child != null,
-                    Item = child != null ? MakeSnapshot(child) : default
-                };
-                list.Add(childSnap);
-            }
+                    if (slot == null) continue;
+                    var child = slot.Content;
+                    var childSnap = new ItemSlotSnapshot
+                    {
+                        Key = slot.Key ?? string.Empty,
+                        HasItem = child != null,
+                        Item = child != null ? MakeSnapshot(child) : default
+                    };
+                    list.Add(childSnap);
+                }
 
-            snap.Slots = list.ToArray();
+                snap.Slots = list.ToArray();
+            }
         }
 
         if (hasDurability)
@@ -372,7 +377,7 @@ public static class ItemTool
             try { item.DurabilityLoss = decodedLoss; } catch { }
         }
         var invSnaps = snapshot.Inventory ?? Array.Empty<ItemInventoryEntrySnapshot>();
-        if (inv != null)
+        if (inv != null && (snapshot.HasInventory || snapshot.Inventory != null))
         {
             var desiredCap = decodedCapacity > 0 ? decodedCapacity : inv.Capacity;
             if (desiredCap != inv.Capacity)
@@ -423,8 +428,7 @@ public static class ItemTool
 
         if (snapshot.Slots != null && snapshot.Slots.Length > 0)
         {
-            foreach (var slotSnap in snapshot.Slots)
-            {
+            foreach (var slotSnap in snapshot.Slots)            {
                 if (!slotSnap.HasItem) continue;
                 var child = BuildItemFromSnapshot(slotSnap.Item);
                 if (child == null) continue;
@@ -455,6 +459,8 @@ public static class ItemTool
             writer.Put(snapshot.Durability);
 
         writer.Put(snapshot.InventoryCapacity);
+        writer.Put(snapshot.HasInventory);
+        writer.Put(snapshot.HasSlots);
 
         var invSnaps = snapshot.Inventory;
         var invCount = invSnaps?.Length ?? 0;
@@ -503,6 +509,8 @@ public static class ItemTool
             snapshot.Durability = reader.GetFloat();
 
         snapshot.InventoryCapacity = reader.GetInt();
+        snapshot.HasInventory = reader.GetBool();
+        snapshot.HasSlots = reader.GetBool();
         var invCount = reader.GetUShort();
         if (invCount > 0)
         {
@@ -675,7 +683,7 @@ public static class ItemTool
             try { item.DurabilityLoss = applyLoss; } catch { }
         }
         var invSnaps = snapshot.Inventory ?? Array.Empty<ItemInventoryEntrySnapshot>();
-        if (inv != null)
+        if (inv != null && (snapshot.HasInventory || snapshot.Inventory != null))
         {
             var desiredCap = applyCapacity > 0 ? applyCapacity : inv.Capacity;
             if (desiredCap != inv.Capacity)
@@ -728,6 +736,14 @@ public static class ItemTool
         var snapSlots = snapshot.Slots ?? Array.Empty<ItemSlotSnapshot>();
 
         if (slots == null || slots.Count == 0)
+        {
+            ApplyCustomDataSnapshot(item, snapshot);
+            return true;
+        }
+
+        // snapshot 里没有槽位数据（不是“槽位为空”，而是这一版快照没带）时，
+        // 不要清空现有配件/钥匙，否则关闭再打开仓库会把附加物品全洗掉。
+        if (!snapshot.HasSlots && snapshot.Slots == null)
         {
             ApplyCustomDataSnapshot(item, snapshot);
             return true;
