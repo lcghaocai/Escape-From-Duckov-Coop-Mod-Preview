@@ -766,6 +766,8 @@ namespace EscapeFromDuckovCoopMod;
     public void Client_ApplyLootboxState(LootStateRpc rpc)
     {
         if (rpc.Id.LootUid == SharedHomeStorage.LootUid && !SharedHomeSave.OverlayActive) return;
+        // 撤离/切图期间排队到达的旧容器状态不要再往已经卸载的 Inventory 上应用。
+        if (SceneLoader.IsSceneLoading || !LevelManager.LevelInited) return;
         var lm = LootManagerInstance;
         if (IsServer || lm == null) return;
 
@@ -806,13 +808,14 @@ namespace EscapeFromDuckovCoopMod;
                 }
 
                 var entries = rpc.Snapshot ?? Array.Empty<LootSlotSnapshot>();
+                var liveCapacity = Mathf.Max(0, inv.Capacity);
                 var present = new HashSet<int>();
                 foreach (var entry in entries)
-                    if (entry.HasItem && entry.Slot >= 0 && entry.Slot < rpc.Capacity)
+                    if (entry.HasItem && entry.Slot >= 0 && entry.Slot < liveCapacity)
                         present.Add(entry.Slot);
 
                 // 快照只带有物品的槽位；不在快照里的槽位才是空槽。
-                for (var i = 0; i < rpc.Capacity; i++)
+                for (var i = 0; i < liveCapacity; i++)
                 {
                     if (present.Contains(i)) continue;
                     var existing = inv.GetItemAt(i);
@@ -826,7 +829,7 @@ namespace EscapeFromDuckovCoopMod;
                 {
                     if (!slot.HasItem) continue;
                     var i = slot.Slot;
-                    if (i < 0 || i >= rpc.Capacity) continue;
+                    if (i < 0 || i >= liveCapacity) continue;
 
                     var targetSnap = slot.Item.TypeId == 0
                         ? new ItemSnapshot { TypeId = slot.TypeId, Stack = slot.Stack }
@@ -877,6 +880,11 @@ namespace EscapeFromDuckovCoopMod;
 
                 changed = true;
                 var delta = rpc.Delta;
+                if (rpc.Slot < 0 || rpc.Slot >= inv.Capacity)
+                {
+                    applied = false;
+                    return;
+                }
                 if (!delta.HasItem)
                 {
                     var existing = inv.GetItemAt(rpc.Slot);
@@ -1366,11 +1374,14 @@ namespace EscapeFromDuckovCoopMod;
             _applyingLootState = true;
             try
             {
-                var item = inv.GetItemAt(rpc.Slot);
-                // 主机已经删除了整个槽位；客机必须按确认再删一次。
-                // 只依赖本地 RemoveAt 时，若快照稍后把物品恢复，就会表现为“可以一直拿”。
-                if (item != null && (rpc.TypeId < 0 || item.TypeID == rpc.TypeId))
-                    inv.RemoveAt(rpc.Slot, out _);
+                if (rpc.Slot >= 0 && rpc.Slot < inv.Capacity)
+                {
+                    var item = inv.GetItemAt(rpc.Slot);
+                    // 主机已经删除了整个槽位；客机必须按确认再删一次。
+                    // 只依赖本地 RemoveAt 时，若快照稍后把物品恢复，就会表现为“可以一直拿”。
+                    if (item != null && (rpc.TypeId < 0 || item.TypeID == rpc.TypeId))
+                        inv.RemoveAt(rpc.Slot, out _);
+                }
             }
             finally { _applyingLootState = applying; }
         }

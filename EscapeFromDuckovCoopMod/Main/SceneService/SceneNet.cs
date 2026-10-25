@@ -545,10 +545,31 @@ public class SceneNet : MonoBehaviour
     {
         if (string.IsNullOrEmpty(targetSceneId) || string.IsNullOrEmpty(hostSceneId)) return false;
         if (string.Equals(targetSceneId, hostSceneId, StringComparison.OrdinalIgnoreCase)) return true;
-        // Base_SceneV2 和 Base 都算基地；Level_X 和 Level_X_Main 也算同一张图。
+        // Base_SceneV2 和 Base 都算基地。
         if (IsBaseScene(targetSceneId) && IsBaseScene(hostSceneId)) return true;
+
+        // Level_Farm_Main / Level_Farm_01 是同一张图的主/子场景；
+        // 去掉 _Main / _01 这类后缀再比较，不能只靠前缀匹配。
+        var targetRoot = SceneRootId(targetSceneId);
+        var hostRoot = SceneRootId(hostSceneId);
+        if (!string.IsNullOrEmpty(targetRoot) &&
+            string.Equals(targetRoot, hostRoot, StringComparison.OrdinalIgnoreCase))
+            return true;
+
         return targetSceneId.StartsWith(hostSceneId, StringComparison.OrdinalIgnoreCase) ||
                hostSceneId.StartsWith(targetSceneId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string SceneRootId(string sceneId)
+    {
+        if (string.IsNullOrEmpty(sceneId)) return string.Empty;
+        if (sceneId.EndsWith("_Main", StringComparison.OrdinalIgnoreCase))
+            return sceneId.Substring(0, sceneId.Length - 5);
+        var underscore = sceneId.LastIndexOf('_');
+        if (underscore > 0 && underscore + 1 < sceneId.Length &&
+            int.TryParse(sceneId.Substring(underscore + 1), out _))
+            return sceneId.Substring(0, underscore);
+        return sceneId;
     }
 
     private bool Client_TrySnapToHostAnchor(bool markPostLoadApplied = false)
