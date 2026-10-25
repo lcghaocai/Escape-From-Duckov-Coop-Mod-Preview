@@ -2,7 +2,7 @@ using LiteNetLib.Utils;
 
 namespace EscapeFromDuckovCoopMod;
 
-[Rpc(Op.PLAYER_HEALTH_BROADCAST, DeliveryMethod.ReliableOrdered, RpcDirection.ServerToClient)]
+[Rpc(Op.PLAYER_HEALTH_BROADCAST, DeliveryMethod.ReliableUnordered, RpcDirection.ServerToClient)]
 public struct PlayerHealthBroadcastRpc : IRpcMessage
 {
     public string PlayerId;
@@ -11,6 +11,7 @@ public struct PlayerHealthBroadcastRpc : IRpcMessage
     public bool HasDamage;
     public DamageForwardPayload Damage;
     public PlayerBuffState[] Buffs;
+    public double Timestamp;
 
     public void Serialize(NetDataWriter writer)
     {
@@ -21,6 +22,7 @@ public struct PlayerHealthBroadcastRpc : IRpcMessage
         if (HasDamage)
             Damage.Serialize(writer);
         PlayerBuffState.Write(writer, Buffs);
+        writer.Put(Timestamp);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -35,5 +37,6 @@ public struct PlayerHealthBroadcastRpc : IRpcMessage
             Damage.Deserialize(reader);
         }
         Buffs = PlayerBuffState.Read(reader);
+        Timestamp = reader.AvailableBytes >= 8 ? reader.GetDouble() : 0d;
     }
 }

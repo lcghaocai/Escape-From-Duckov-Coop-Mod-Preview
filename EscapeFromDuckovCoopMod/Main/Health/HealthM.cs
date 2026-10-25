@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -39,6 +39,8 @@ public class HealthM : MonoBehaviour
     public static HealthM Instance;
 
     private readonly Dictionary<string, (float max, float cur)> _srvPlayerSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, double> _srvPlayerHealthTimestamp = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, double> _cliPlayerHealthTimestamp = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, float> _srvNextBroadcast = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, float> _srvNextDamageRequestBySenderTarget = new(StringComparer.Ordinal);
 
@@ -118,7 +120,8 @@ public class HealthM : MonoBehaviour
             Damage = DamageForwardPayload.FromDamageInfo(damage),
             LifeId = _localDeathReport.LifeId,
             IsDead = health.IsDead,
-            Buffs = Buff_.CaptureLocal()
+            Buffs = Buff_.CaptureLocal(),
+            Timestamp = Time.unscaledTimeAsDouble
         };
 
         CoopTool.SendRpc(in rpc);
@@ -192,8 +195,9 @@ public class HealthM : MonoBehaviour
         var (max, cur) = ReadHealth(health);
         if (max <= 0f) return;
 
-
-        BroadcastPlayerSnapshot(playerId, max, cur, damage.HasValue ? DamageForwardPayload.FromDamageInfo(damage) : (DamageForwardPayload?)null, null, Buff_.CaptureLocal());
+        var timestamp = Time.unscaledTimeAsDouble;
+        _srvPlayerHealthTimestamp[playerId] = timestamp;
+        BroadcastPlayerSnapshot(playerId, max, cur, damage.HasValue ? DamageForwardPayload.FromDamageInfo(damage) : (DamageForwardPayload?)null, null, timestamp, Buff_.CaptureLocal());
     }
 
     private static (float max, float cur) ReadHealth(Health health)
@@ -204,12 +208,13 @@ public class HealthM : MonoBehaviour
         return (max, cur);
     }
 
-    private void BroadcastPlayerSnapshot(string playerId, float max, float cur, DamageForwardPayload? damage, NetPeer excludePeer, PlayerBuffState[] buffs = null)
+    private void BroadcastPlayerSnapshot(string playerId, float max, float cur, DamageForwardPayload? damage, NetPeer excludePeer, double timestamp, PlayerBuffState[] buffs = null)
     {
         if (!IsServer || string.IsNullOrEmpty(playerId) || max <= 0f) return;
 
         _srvPlayerSnapshots[playerId] = (max, cur);
         _srvNextBroadcast[playerId] = Time.time + SERVER_SEND_INTERVAL;
+        if (timestamp <= 0d) timestamp = Time.unscaledTimeAsDouble;
 
         var rpc = new PlayerHealthBroadcastRpc
         {
@@ -218,7 +223,8 @@ public class HealthM : MonoBehaviour
             CurrentHealth = cur,
             HasDamage = damage.HasValue,
             Damage = damage ?? default,
-            Buffs = buffs
+            Buffs = buffs,
+            Timestamp = timestamp
         };
 
         CoopTool.SendRpc(in rpc, excludePeer);
@@ -236,6 +242,10 @@ public class HealthM : MonoBehaviour
 
         var max = Mathf.Max(1f, message.MaxHealth);
         var cur = Mathf.Clamp(message.CurrentHealth, 0f, max);
+        var timestamp = message.Timestamp > 0d ? message.Timestamp : Time.unscaledTimeAsDouble;
+        if (_srvPlayerHealthTimestamp.TryGetValue(playerId, out var lastTimestamp) && timestamp <= lastTimestamp)
+            return;
+        _srvPlayerHealthTimestamp[playerId] = timestamp;
 
 
         if (remoteCharacters != null && remoteCharacters.TryGetValue(sender, out var go) && go)
@@ -248,7 +258,7 @@ public class HealthM : MonoBehaviour
         }
 
         COOPManager.Buff?.ReceiveSnapshot(playerId, message.Buffs);
-        BroadcastPlayerSnapshot(playerId, max, cur, message.HasDamage ? message.Damage : (DamageForwardPayload?)null, sender, message.Buffs);
+        BroadcastPlayerSnapshot(playerId, max, cur, message.HasDamage ? message.Damage : (DamageForwardPayload?)null, sender, timestamp, message.Buffs);
     }
 
     public bool Server_CanSpawnDeathLoot(CoopPeer peer, string lifeId) => IsServer && networkStarted &&
@@ -265,6 +275,8 @@ public class HealthM : MonoBehaviour
         _localDeathReport.Reset();
         _deathReports.Clear();
         _srvPlayerSnapshots.Clear();
+        _srvPlayerHealthTimestamp.Clear();
+        _cliPlayerHealthTimestamp.Clear();
         _srvNextBroadcast.Clear();
         _srvNextDamageRequestBySenderTarget.Clear();
         _cliLastSentHp = default;
@@ -317,6 +329,12 @@ public class HealthM : MonoBehaviour
     {
         if (IsServer || string.IsNullOrEmpty(message.PlayerId)) return;
         if (Service != null && Service.IsSelfId(message.PlayerId)) return;
+
+        var timestamp = message.Timestamp > 0d ? message.Timestamp : Time.unscaledTimeAsDouble;
+        if (_cliPlayerHealthTimestamp.TryGetValue(message.PlayerId, out var lastTimestamp) && timestamp <= lastTimestamp)
+            return;
+        _cliPlayerHealthTimestamp[message.PlayerId] = timestamp;
+
         COOPManager.Buff?.ReceiveSnapshot(message.PlayerId, message.Buffs);
 
         var max = Mathf.Max(1f, message.MaxHealth);
@@ -416,7 +434,8 @@ public class HealthM : MonoBehaviour
                 MaxHealth = max,
                 CurrentHealth = cur,
                 HasDamage = false,
-                Damage = default
+                Damage = default,
+                Timestamp = _srvPlayerHealthTimestamp.TryGetValue(playerId, out var timestamp) ? timestamp : 0d
             };
 
             CoopTool.SendRpcTo(peer, in rpc);

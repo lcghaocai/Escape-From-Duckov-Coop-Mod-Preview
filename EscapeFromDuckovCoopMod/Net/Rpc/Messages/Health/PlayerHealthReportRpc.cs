@@ -2,7 +2,7 @@ using LiteNetLib.Utils;
 
 namespace EscapeFromDuckovCoopMod;
 
-[Rpc(Op.PLAYER_HEALTH_REPORT, DeliveryMethod.ReliableOrdered, RpcDirection.ClientToServer)]
+[Rpc(Op.PLAYER_HEALTH_REPORT, DeliveryMethod.ReliableUnordered, RpcDirection.ClientToServer)]
 public struct PlayerHealthReportRpc : IRpcMessage
 {
     public float MaxHealth;
@@ -12,6 +12,7 @@ public struct PlayerHealthReportRpc : IRpcMessage
     public string LifeId;
     public bool IsDead;
     public PlayerBuffState[] Buffs;
+    public double Timestamp;
 
     public void Serialize(NetDataWriter writer)
     {
@@ -23,6 +24,7 @@ public struct PlayerHealthReportRpc : IRpcMessage
         writer.Put(LifeId ?? string.Empty);
         writer.Put(IsDead);
         PlayerBuffState.Write(writer, Buffs);
+        writer.Put(Timestamp);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -38,5 +40,6 @@ public struct PlayerHealthReportRpc : IRpcMessage
         LifeId = reader.AvailableBytes > 0 ? reader.GetString() : string.Empty;
         IsDead = reader.AvailableBytes > 0 && reader.GetBool();
         Buffs = PlayerBuffState.Read(reader);
+        Timestamp = reader.AvailableBytes >= 8 ? reader.GetDouble() : 0d;
     }
 }
