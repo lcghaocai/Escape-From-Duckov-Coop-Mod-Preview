@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="LiteNetLib"><HintPath>../../Shared/LiteNetLib.dll</HintPath><Private>true</Private></Reference>
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Scheduling/*.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Transport/Direct/*.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Transport/CoopNetworkManager.cs" Link="Production/CoopNetworkManager.cs" />
+    <Compile Include="../../EscapeFromDuckovModApi/Networking/CoopPeer.cs" Link="Production/CoopPeer.cs" />
+    <Compile Include="../../EscapeFromDuckovModApi/Networking/CoopPacketReader.cs" Link="Production/CoopPacketReader.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Main/Op.cs" Link="Production/Op.cs" />
+  </ItemGroup>
+</Project>

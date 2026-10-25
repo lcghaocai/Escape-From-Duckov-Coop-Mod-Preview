@@ -461,7 +461,6 @@ public class ModBehaviourF : MonoBehaviour
         {
             SceneNet.Instance.Server_ClearLoadInProgress();
             COOPManager.ItemNet?.Server_RebuildDropRegistryFromScene();
-            COOPManager.ItemNet?.Server_BroadcastDropSnapshot();
         }
         else
         {
@@ -475,6 +474,7 @@ public class ModBehaviourF : MonoBehaviour
 
     private void OnSceneUnloaded_ClearRegistries(Scene scene)
     {
+        COOPManager.Weather?.ResetSnapshots();
         CoopSyncDatabase.Environment.Clear();
         CoopSyncDatabase.AI.Clear();
         CoopSyncDatabase.Loot.Clear();

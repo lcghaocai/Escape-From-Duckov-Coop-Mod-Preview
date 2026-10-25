@@ -519,6 +519,8 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
         using var stopping = ConnectionRecovery.Stopping();
         var returnToMenu = SharedHome.Guest;
         var disconnectedNetwork = netManager;
+        COOPManager.Weather?.ResetSnapshots();
+        COOPManager.ItemNet?.Reset(preserveDropIds: true);
         LateJoinScene.Reset();
         LocalAppearanceTravel.Reset();
         SharedHome.Reset();

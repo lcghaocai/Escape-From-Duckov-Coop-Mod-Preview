@@ -10,7 +10,7 @@ using Object = UnityEngine.Object;
 
 namespace EscapeFromDuckovCoopMod;
 
-public class Weather
+public partial class Weather
 {
     private const float ClockBroadcastInterval = 1.0f;
     private const float WeatherBroadcastInterval = 2.0f;
@@ -18,8 +18,6 @@ public class Weather
     private const int DoorChunkSize = 80;
     private const float LootStateBroadcastInterval = 35f;
 
-    private readonly List<(int key, bool state)> _lootSnapshotBuffer = new();
-    private readonly List<(int key, bool closed)> _doorSnapshotBuffer = new();
     private readonly List<(int key, bool closed)> _pendingDoorStates = new();
 
     private float _clockTimer;
@@ -53,6 +51,8 @@ public class Weather
         if (!IsServer || !networkStarted) return;
         if (!LevelManager.LevelInited || LevelManager.Instance == null) return;
 
+        FlushEnvironmentSnapshots();
+
         _clockTimer += deltaTime;
         if (_clockTimer >= ClockBroadcastInterval)
         {
@@ -73,7 +73,7 @@ public class Weather
             if (_lootSyncTimer >= LootStateBroadcastInterval)
             {
                 _lootSyncTimer = 0f;
-                SendLootSnapshot(null);
+                QueueEnvironmentSnapshots();
             }
         }
         else
@@ -84,7 +84,13 @@ public class Weather
 
     public void Client_RequestSnapshot()
     {
-        if (IsServer || !networkStarted) return;
+        if (IsServer || !networkStarted || !LevelManager.LevelInited || SceneLoader.IsSceneLoading ||
+            string.IsNullOrEmpty(SceneNet.Instance?._sceneReadySidSent)) return;
+        var now = EnvironmentNow();
+        var scene = SceneNet.Instance._sceneReadySidSent;
+        if (_lastRequestScene == scene && now - _lastRequestAt < 1) return;
+        _lastRequestScene = scene;
+        _lastRequestAt = now;
 
         _clientClockSynced = false;
         _clientWeatherSynced = false;
@@ -112,16 +118,17 @@ public class Weather
 
     public void Server_HandleSnapshotRequest(RpcContext context)
     {
-        if (!IsServer || context.Sender == null) return;
-
-        SendClockState(context.Sender, true);
-        SendWeatherState(context.Sender, true);
-        SendLootSnapshot(context.Sender);
-        DeadLootBox.Instance?.Server_ReplayToPeer(context.Sender);
-        SendDoorSnapshot(context.Sender);
-        LevelDataBoolNet.Server_SendCostTakerSnapshot(context.Sender);
-        SendDestructibleSnapshot(context.Sender);
-        SendExplosiveBarrelSnapshot(context.Sender);
+        if (!IsServer || context.Sender == null || !LevelManager.LevelInited) return;
+        var now = EnvironmentNow();
+        var scene = Service.playerStatuses.TryGetValue(context.Sender, out var status) ? status.SceneId : null;
+        if (_environmentSnapshots.TryGet(context.Sender, out var pending))
+        {
+            if (pending.Full && pending.Scene == scene && now - pending.RequestedAt < 1) return;
+            pending.Steps.Dispose();
+            _environmentSnapshots.Remove(context.Sender);
+        }
+        _environmentSnapshots.Add(context.Sender, new EnvironmentSnapshotWork
+        { Full = true, Scene = scene, RequestedAt = now, Steps = SendEnvironmentSnapshot(context.Sender).GetEnumerator() });
     }
 
     public void Client_HandleClockState(EnvClockStateRpc message)
@@ -446,147 +453,6 @@ public class Weather
             CoopTool.SendRpcTo(target, in rpc);
         else
             CoopTool.SendRpc(in rpc);
-    }
-
-    private void SendLootSnapshot(NetPeer target)
-    {
-        _lootSnapshotBuffer.Clear();
-
-        foreach (var entry in CoopSyncDatabase.Loot.Entries)
-        {
-            if (entry == null) continue;
-            if (LootboxDetectUtil.IsPrivateInventory(entry.Inventory)) continue;
-            var key = entry.PositionKey;
-            if (key == 0) continue;
-
-            GameObject go = null;
-            try
-            {
-                if (entry.Loader)
-                    go = entry.Loader.gameObject;
-                else if (entry.Lootbox)
-                    go = entry.Lootbox.gameObject;
-            }
-            catch
-            {
-                go = null;
-            }
-
-            if (go == null) continue;
-
-            var active = false;
-            try
-            {
-                active = go.activeSelf;
-            }
-            catch
-            {
-            }
-
-            _lootSnapshotBuffer.Add((key, active));
-        }
-
-        if (_lootSnapshotBuffer.Count == 0)
-        {
-            var empty = new EnvLootChunkRpc
-            {
-                Reset = true,
-                Keys = Array.Empty<int>(),
-                States = Array.Empty<bool>()
-            };
-            if (target != null)
-                CoopTool.SendRpcTo(target, in empty);
-            else
-                CoopTool.SendRpc(in empty);
-            return;
-        }
-
-        for (var offset = 0; offset < _lootSnapshotBuffer.Count; offset += LootChunkSize)
-        {
-            var count = Math.Min(LootChunkSize, _lootSnapshotBuffer.Count - offset);
-            var keys = new int[count];
-            var states = new bool[count];
-
-            for (var i = 0; i < count; i++)
-            {
-                var tuple = _lootSnapshotBuffer[offset + i];
-                keys[i] = tuple.key;
-                states[i] = tuple.state;
-            }
-
-            var rpc = new EnvLootChunkRpc
-            {
-                Reset = offset == 0,
-                Keys = keys,
-                States = states
-            };
-
-            if (target != null)
-                CoopTool.SendRpcTo(target, in rpc);
-            else
-                CoopTool.SendRpc(in rpc);
-        }
-    }
-
-    private void SendDoorSnapshot(NetPeer target)
-    {
-        _doorSnapshotBuffer.Clear();
-
-        var registry = CoopSyncDatabase.Environment.Doors;
-
-        var entries = registry.Entries;
-        for (var i = 0; i < entries.Count; i++)
-        {
-            var entry = entries[i];
-            if (entry == null) continue;
-
-            var door = entry.Door;
-            if (!door) continue;
-
-            registry.Register(door);
-
-            var key = entry.Key;
-            if (key == 0)
-                key = Door.TryGetDoorKey(door);
-
-            if (key == 0) continue;
-
-            var closed = true;
-            try
-            {
-                closed = !door.IsOpen;
-            }
-            catch
-            {
-            }
-
-            _doorSnapshotBuffer.Add((key, closed));
-        }
-
-        if (_doorSnapshotBuffer.Count == 0) return;
-
-        for (var offset = 0; offset < _doorSnapshotBuffer.Count; offset += DoorChunkSize)
-        {
-            var count = Math.Min(DoorChunkSize, _doorSnapshotBuffer.Count - offset);
-            var keys = new int[count];
-            var states = new bool[count];
-
-            for (var i = 0; i < count; i++)
-            {
-                var tuple = _doorSnapshotBuffer[offset + i];
-                keys[i] = tuple.key;
-                states[i] = tuple.closed;
-            }
-
-            var rpc = new EnvDoorChunkRpc
-            {
-                Reset = offset == 0,
-                Keys = keys,
-                ClosedStates = states
-            };
-
-            CoopTool.SendRpcTo(target, in rpc);
-        }
     }
 
     private void SendDestructibleSnapshot(NetPeer target)

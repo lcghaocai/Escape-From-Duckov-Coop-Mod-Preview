@@ -50,6 +50,7 @@ public sealed partial class AISyncService
     private const float MinServerSnapshotBroadcastIntervalRuntime = 30f;
     private const float PerfLogInterval = 5f;
     private const int MaxReplicaSpawnsPerFrame = 1;
+    private const int MaxConcurrentReplicaSpawns = 2;
     private const int ClientEntryCheckBudgetCap = 64;
     private const int MaxSnapshotChunkEntriesRuntime = 4;
     private const int MaxReliableQueueBeforeSnapshot = 64;
@@ -103,7 +104,6 @@ public sealed partial class AISyncService
     private readonly Dictionary<string, GameObject> _modelCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CharacterRandomPreset> _presetCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GameObject> _hideIfFoundEnemyCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<AISnapshotEntry> _snapshotBuffer = new();
     private readonly List<AISyncEntry> _clientEntryBuffer = new();
     private readonly Queue<AISnapshotEntry> _pendingSnapshotQueue = new();
     private readonly Queue<int> _pendingStateUpdates = new();
@@ -233,6 +233,7 @@ public sealed partial class AISyncService
     {
         AiQuestCredit.Reset();
         _serverSnapshotChunks.Clear();
+        _serverSnapshotRequests.Clear();
         ResetNativeAreas();
         _clientBuffOrder.Clear();
         _aiBuffReplayOrder.Clear();
@@ -421,7 +422,6 @@ public sealed partial class AISyncService
         if (!IsServer || Service == null || !Service.networkStarted) return;
         if (CheckAndHandleSyncBlock()) return;
         AiQuestCredit.CleanupDeaths();
-        Server_FlushSnapshotChunks();
 
         if (_serverPendingBuffs.Count > 0)
             ProcessServerBuffQueue();
@@ -536,6 +536,7 @@ public sealed partial class AISyncService
         }
 
         Server_FlushPendingHealth(now);
+        Server_FlushSnapshotChunks();
 
         if (now >= _nextServerRescanTime)
         {
@@ -557,50 +558,37 @@ public sealed partial class AISyncService
     {
         if (!IsServer || context.Sender == null) return;
         if (CheckAndHandleSyncBlock()) return;
-        if (_serverSnapshotChunks.ContainsKey(context.Sender)) return;
-        if (Service.netManager.GetReliableQueueLength(context.Sender) >= MaxReliableQueueBeforeSnapshot) return;
-
-        try
+        var scene = Service.playerStatuses.TryGetValue(context.Sender, out var status) ? status.SceneId : null;
+        var now = Time.unscaledTime;
+        if (_serverSnapshotChunks.Contains(context.Sender))
         {
-            _snapshotBuffer.Clear();
-            var hasRadius = message.HasRadius;
-            var center = message.Center;
-            var radiusSqr = message.Radius * message.Radius;
-            var reset = message.ForceFull;
-
-            foreach (var entry in Server_SnapshotEntries())
-            {
-                if (entry == null) continue;
-                if (message.VehiclesOnly && !entry.IsVehicle) continue;
-
-                if (hasRadius)
-                {
-                    var distanceSqr = (GetEntryAnchor(entry) - center).sqrMagnitude;
-                    if (distanceSqr > radiusSqr && !HasNativeArea(entry.CharacterPresetKey)) continue;
-                }
-
-                var snapshot = BuildSnapshotEntry(entry);
-                var duplicate = !hasRadius && !snapshot.IsVehicle && !message.VehiclesOnly && HasDuplicateSnapshot(entry.Id, in snapshot);
-                if (!reset && duplicate)
-                    continue;
-
-                _snapshotBuffer.Add(snapshot);
-
-                if (_snapshotBuffer.Count >= SnapshotChunkSize)
-                {
-                    SendSnapshotChunk(context.Sender, _snapshotBuffer, reset);
-                    reset = false;
-                    _snapshotBuffer.Clear();
-                }
-            }
-
-            if (_snapshotBuffer.Count > 0)
-                SendSnapshotChunk(context.Sender, _snapshotBuffer, reset);
+            if (!message.ForceFull) return;
+            if (_serverSnapshotRequests.TryGetValue(context.Sender, out var pending) &&
+                pending.Scene == scene && now - pending.Time < 1f) return;
+            _serverSnapshotChunks.Remove(context.Sender);
         }
-        finally
+        _serverSnapshotRequests[context.Sender] = (scene, now);
+
+        // Keep the request even if the reliable queue is busy. Building full
+        // equipment/buff snapshots here used to repeat all that work at send time.
+        var ids = new List<int>(SnapshotChunkSize);
+        var radiusSqr = message.Radius * message.Radius;
+        var reset = message.ForceFull;
+        var queued = false;
+        foreach (var entry in Server_SnapshotEntries())
         {
-            _snapshotBuffer.Clear();
+            if (entry == null || (message.VehiclesOnly && !entry.IsVehicle)) continue;
+            if (message.HasRadius && (GetEntryAnchor(entry) - message.Center).sqrMagnitude > radiusSqr &&
+                !HasNativeArea(entry.CharacterPresetKey)) continue;
+            ids.Add(entry.Id);
+            if (ids.Count < SnapshotChunkSize) continue;
+            QueueSnapshotIds(context.Sender, ids.ToArray(), reset);
+            ids.Clear();
+            reset = false;
+            queued = true;
         }
+        // An empty scene still needs an acknowledgement to stop timeout retries.
+        if (ids.Count > 0 || !queued) QueueSnapshotIds(context.Sender, ids.ToArray(), reset);
     }
 
     public void Server_HandleActivationRequest(RpcContext context, AIActivationRequestRpc message)
@@ -642,6 +630,7 @@ public sealed partial class AISyncService
     {
         if (!IsServer || peer == null) return;
         _serverSnapshotChunks.Remove(peer);
+        _serverSnapshotRequests.Remove(peer);
 
         foreach (var watchers in _serverWatchers.Values)
             watchers?.Remove(peer);
@@ -1016,7 +1005,7 @@ public sealed partial class AISyncService
 
     private void Client_ProcessReplicaSpawnQueue()
     {
-        if (_clientReplicaSpawning.Count >= MaxReplicaSpawnsPerFrame)
+        if (_clientReplicaSpawning.Count >= MaxConcurrentReplicaSpawns)
             return;
 
         var spawned = 0;
@@ -2296,7 +2285,7 @@ public sealed partial class AISyncService
 
         var buffers = statuses.Keys
             .Where(peer => peer != null && peer.ConnectionState == ConnectionState.Connected &&
-                !_serverSnapshotChunks.ContainsKey(peer) &&
+                !_serverSnapshotChunks.Contains(peer) &&
                 service.netManager.GetReliableQueueLength(peer) < MaxReliableQueueBeforeSnapshot)
             .ToDictionary(peer => peer, _ => new List<AISnapshotEntry>(SnapshotChunkSize));
         if (buffers.Count == 0) return false;

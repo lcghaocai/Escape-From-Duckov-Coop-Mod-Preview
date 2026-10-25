@@ -25,13 +25,11 @@ using UnityEngine;
 
 namespace EscapeFromDuckovCoopMod;
 
-public sealed class ItemNet
+public sealed partial class ItemNet
 {
     [ThreadStatic] public static bool InNetworkDrop;
 
-    private readonly Queue<ItemDropSnapshotEntry> _snapshotQueue = new();
-    private bool _snapshotResetPending;
-    private bool _snapshotInProgress;
+    private readonly SnapshotReceiveQueue<uint, ItemDropSnapshotEntry> _snapshotStream = new();
 
     private readonly Dictionary<uint, uint> _pendingByToken = new();
     private readonly HashSet<uint> _pendingPickups = new();
@@ -39,47 +37,33 @@ public sealed class ItemNet
 
     public void Server_Update(float deltaTime)
     {
+        var service = NetService.Instance;
+        if (service == null || !service.IsServer || !service.networkStarted || !LevelManager.LevelInited) return;
+        _serverDropSnapshots.Tick(
+            peer => peer.ConnectionState == ConnectionState.Connected,
+            peer => NetService.Instance.netManager.GetReliableQueueLength(peer) >= 16,
+            Server_SendNextDropChunk, SnapshotNow, 0.002);
     }
 
     public void Client_Update(float deltaTime)
     {
-        if (!_snapshotInProgress)
+        EnsureClientDropSnapshot();
+        if (!_snapshotStream.InProgress)
             return;
 
-        if (_snapshotResetPending)
-        {
-            _snapshotResetPending = false;
-            _nextDropId = 1;
-
-            foreach (var entry in CoopSyncDatabase.Drops.Entries.ToArray())
-            {
-                try
-                {
-                    if (entry.Agent)
-                    {
-                        UnityEngine.Object.Destroy(entry.Agent);
-                    }
-                    else if (entry.Item && !entry.Item.InInventory)
-                    {
-                        entry.Item.DestroyTree();
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-        CoopSyncDatabase.Drops.Clear();
-        _pendingPickups.Clear();
-    }
+        ApplyPendingSnapshotReset();
 
         const int maxSpawnsPerFrame = 6;
         var processed = 0;
+        var deadline = SnapshotNow() + 0.002;
 
-        while (processed < maxSpawnsPerFrame && _snapshotQueue.Count > 0)
+        while (processed < maxSpawnsPerFrame && _snapshotStream.Count > 0 &&
+               (processed == 0 || SnapshotNow() < deadline))
         {
             processed++;
-            var entry = _snapshotQueue.Dequeue();
+            var entry = _snapshotStream.Dequeue();
+            if (_snapshotStream.IsRemoved(entry.DropId) ||
+                CoopSyncDatabase.Drops.TryGetById(entry.DropId, out _)) continue;
 
             var item = ItemTool.BuildItemFromSnapshot(entry.Snapshot);
             if (item == null) continue;
@@ -103,17 +87,23 @@ public sealed class ItemNet
             _nextDropId = Math.Max(_nextDropId, entry.DropId + 1);
         }
 
-        if (_snapshotQueue.Count == 0 && !_snapshotResetPending)
-            _snapshotInProgress = false;
+        _snapshotStream.FinishFrame();
     }
 
-    public void Reset()
+    public void Reset() => Reset(preserveDropIds: false);
+
+    internal void Reset(bool preserveDropIds)
     {
-        _snapshotQueue.Clear();
-        _snapshotResetPending = false;
-        _snapshotInProgress = false;
+        _snapshotStream.Clear();
         _pendingByToken.Clear();
-        _nextDropId = 1;
+        _pendingPickups.Clear();
+        _serverDropSnapshots.Clear();
+        _serverDropRegistryBuilt = false;
+        _clientDropRequestPeer = null;
+        _clientDropRequestScene = null;
+        _lastDropRequestAt = double.NegativeInfinity;
+        _lastDropReceiveAt = double.NegativeInfinity;
+        if (!preserveDropIds) _nextDropId = 1;
     }
 
     public void Server_RebuildDropRegistryFromScene()
@@ -121,6 +111,7 @@ public sealed class ItemNet
         if (!NetService.Instance.IsServer || NetService.Instance?.networkStarted != true)
             return;
 
+        _serverDropRegistryBuilt = true;
         var seenDropIds = new HashSet<uint>();
         CoopSyncDatabase.Drops.Clear();
 
@@ -148,13 +139,17 @@ public sealed class ItemNet
     public void Client_RequestDropSnapshot(bool includeReset = true)
     {
         var service = NetService.Instance;
-        if (service == null || service.IsServer || !service.networkStarted) return;
-
-        var rpc = new ItemDropSnapshotRequestRpc
-        {
-            Reset = includeReset
-        };
-
+        var scene = SceneNet.Instance?._sceneReadySidSent;
+        if (service == null || service.IsServer || !service.networkStarted ||
+            service.connectedPeer?.ConnectionState != ConnectionState.Connected ||
+            !LevelManager.LevelInited || SceneLoader.IsSceneLoading || string.IsNullOrEmpty(scene)) return;
+        var now = SnapshotNow();
+        if (_clientDropRequestPeer == service.connectedPeer && _clientDropRequestScene == scene &&
+            now - _lastDropRequestAt < 1) return;
+        _clientDropRequestPeer = service.connectedPeer;
+        _clientDropRequestScene = scene;
+        _lastDropRequestAt = now;
+        var rpc = new ItemDropSnapshotRequestRpc { Reset = includeReset };
         CoopTool.SendRpc(in rpc);
     }
 
@@ -204,6 +199,8 @@ public sealed class ItemNet
     public void Client_HandleSpawn(ItemSpawnRpc message)
     {
         if (NetService.Instance?.IsServer == true) return;
+        ApplyPendingSnapshotReset();
+        if (CoopSyncDatabase.Drops.TryGetById(message.DropId, out _)) return;
 
         var item = ItemTool.BuildItemFromSnapshot(message.Snapshot);
         if (item == null) return;
@@ -222,6 +219,7 @@ public sealed class ItemNet
 
         ItemTool.AddNetDropTag(agent ? agent.gameObject : item.gameObject, message.DropId);
         CoopSyncDatabase.Drops.Register(message.DropId, item, agent ? agent.gameObject : item.gameObject);
+        _nextDropId = Math.Max(_nextDropId, message.DropId + 1);
     }
 
     public void Server_RegisterLocalDrop(Item item, DuckovItemAgent agent, Vector3 pos, bool createRigidbody, Vector3 dir, float angle) =>
@@ -329,6 +327,10 @@ public sealed class ItemNet
     public void Client_HandleDespawn(ItemDespawnRpc message)
     {
         if (NetService.Instance?.IsServer == true) return;
+        ApplyPendingSnapshotReset();
+        // A snapshot entry may still be awaiting Unity instantiation. Do not let
+        // it resurrect an item that another player has already picked up.
+        _snapshotStream.Remove(message.DropId);
         if (!CoopSyncDatabase.Drops.TryGetById(message.DropId, out var entry) || entry == null)
             return;
 
@@ -386,93 +388,36 @@ public sealed class ItemNet
     public void Client_HandleDropSnapshotChunk(ItemDropSnapshotChunkRpc message)
     {
         if (NetService.Instance?.IsServer == true) return;
-
-        var entries = message.Entries;
-        if (entries == null) return;
-
-        if (message.Reset)
-        {
-            _snapshotQueue.Clear();
-            _snapshotResetPending = true;
-        }
-
-        foreach (var entry in entries)
-        {
-            _snapshotQueue.Enqueue(entry);
-        }
-
-        if (message.IsLast && _snapshotQueue.Count == 0 && _snapshotResetPending)
-        {
-            // Handle empty snapshots immediately.
-            _snapshotInProgress = true;
-        }
-        else if (_snapshotQueue.Count > 0 || message.Reset)
-        {
-            _snapshotInProgress = true;
-        }
+        _lastDropReceiveAt = SnapshotNow();
+        _snapshotStream.Receive(message.Entries, message.Reset, message.IsLast);
     }
 
-    private void Server_SendDropSnapshotTo(NetPeer target, bool includeReset)
+    private void ApplyPendingSnapshotReset()
     {
-        if (!NetService.Instance.IsServer || target == null) return;
-
-        Server_RebuildDropRegistryFromScene();
-
-        var entries = CoopSyncDatabase.Drops.Entries
-            .Where(e => e != null && !ItemTool.HasQuestTag(e.Agent ? e.Agent.gameObject : e.Item ? e.Item.gameObject : null))
-            .ToArray();
-        const int chunkSize = 12;
-
-        if (entries.Length == 0)
+        if (_snapshotStream.ConsumeReset())
         {
-            if (includeReset)
-            {
-                var empty = new ItemDropSnapshotChunkRpc
-                {
-                    Version = 1,
-                    Reset = true,
-                    IsLast = true,
-                    Entries = Array.Empty<ItemDropSnapshotEntry>()
-                };
+            _nextDropId = 1;
 
-                CoopTool.SendRpcTo(target, in empty);
+            foreach (var entry in CoopSyncDatabase.Drops.Entries.ToArray())
+            {
+                try
+                {
+                    if (entry.Agent)
+                    {
+                        UnityEngine.Object.Destroy(entry.Agent);
+                    }
+                    else if (entry.Item && !entry.Item.InInventory)
+                    {
+                        entry.Item.DestroyTree();
+                    }
+                }
+                catch
+                {
+                }
             }
 
-            return;
-        }
-
-        for (var i = 0; i < entries.Length; i += chunkSize)
-        {
-            var len = Mathf.Min(chunkSize, entries.Length - i);
-            var chunkEntries = new ItemDropSnapshotEntry[len];
-            for (var j = 0; j < len; j++)
-            {
-                var e = entries[i + j];
-                var pos = e.Agent ? e.Agent.transform.position : (e.Item ? e.Item.transform.position : Vector3.zero);
-                chunkEntries[j] = new ItemDropSnapshotEntry
-                {
-                    DropId = e.DropId,
-                    Position = pos,
-                    Direction = Vector3.zero,
-                    Angle = 0f,
-                    CreateRigidbody = false,
-                    PickupThrowable = e.Agent && e.Agent.GetComponentInParent<PickupThrowableTag>(),
-                    Velocity = e.Agent && e.Agent.GetComponentInParent<PickupThrowableTag>() ?
-                        e.Agent.GetComponentInParent<Rigidbody>()?.velocity ?? Vector3.zero : Vector3.zero,
-                    SceneBuildIndex = GetDropSceneBuildIndex(e.Agent),
-                    Snapshot = ItemTool.MakeSnapshot(e.Item)
-                };
-            }
-
-            var chunk = new ItemDropSnapshotChunkRpc
-            {
-                Version = 1,
-                Reset = includeReset && i == 0,
-                IsLast = i + len >= entries.Length,
-                Entries = chunkEntries
-            };
-
-            CoopTool.SendRpcTo(target, in chunk);
+            CoopSyncDatabase.Drops.Clear();
+            _pendingPickups.Clear();
         }
     }
 
