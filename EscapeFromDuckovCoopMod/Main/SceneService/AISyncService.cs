@@ -38,11 +38,8 @@ public sealed partial class AISyncService
     private const float VehicleTransformSyncCullDistance = 150f;
     private const float SlowAiSpeedThreshold = 1.2f;
     private const float SlowAiStateIntervalScale = 0.5f;
-    private const float SlowAiMinPositionDeltaScale = 0.25f;
     private const float MovingAiStateInterval = 0.05f;
-    private const float SlowAiMinPositionDeltaFloor = 0.01f;
     private const float VehicleStateIntervalFloor = 0.2f;
-    private const float VehicleMinPositionDeltaFloor = 0.4f;
     private const float VehicleReplicaKeepAliveDistance = 140f;
     private const float VehicleSnapshotRefreshInterval = 6f;
     private const float VehicleStateSuppressAfterTransformSeconds = 1f;
@@ -63,8 +60,6 @@ public sealed partial class AISyncService
     private float StateBroadcastInterval => Settings.StateBroadcastInterval;
     private float IdleStateRecordInterval => Settings.IdleStateRecordInterval;
     private float HealthBroadcastInterval => Settings.HealthBroadcastInterval;
-    private float MinPositionDelta => Settings.MinPositionDelta;
-    private float MinRotationDelta => Settings.MinRotationDelta;
     private float VelocityLerp => Settings.VelocityLerp;
     private float SnapshotRefreshInterval => Mathf.Max(Settings.SnapshotRefreshInterval, MinSnapshotRefreshIntervalRuntime);
     private float SnapshotRequestTimeout => Settings.SnapshotRequestTimeout;
@@ -468,10 +463,9 @@ public sealed partial class AISyncService
             var positionDelta = position - entry.LastKnownPosition;
             var sampleDeltaTime = Mathf.Max(now - entry.LastStateSentTime, safeDeltaTime);
             var velocity = positionDelta / sampleDeltaTime;
-            var activeWeaponChanged = false;
             if (now >= entry.NextWeaponCheckTime)
             {
-                activeWeaponChanged = RefreshActiveWeapon(entry, cmc);
+                RefreshActiveWeapon(entry, cmc);
                 entry.NextWeaponCheckTime = now + 0.5f;
             }
 
@@ -486,9 +480,6 @@ public sealed partial class AISyncService
                 entry.LastStateSentTime = now;
                 continue;
             }
-
-            var posDeltaSqr = positionDelta.sqrMagnitude;
-            var rotDelta = Quaternion.Angle(rotation, entry.LastKnownRotation);
 
             var speedSqr = velocity.sqrMagnitude;
             var isSlowMoving = speedSqr > 0.0001f && speedSqr <= SlowAiSpeedThreshold * SlowAiSpeedThreshold;
@@ -511,24 +502,11 @@ public sealed partial class AISyncService
                 continue;
             }
 
-            var positionDeltaThreshold = isSlowMoving
-                ? Mathf.Max(SlowAiMinPositionDeltaFloor, MinPositionDelta * SlowAiMinPositionDeltaScale)
-                : MinPositionDelta;
-
-            if (isVehicleEntry)
-                positionDeltaThreshold = Mathf.Max(positionDeltaThreshold, VehicleMinPositionDeltaFloor);
-
-            if (isMoving)
-            {
-                if (!activeWeaponChanged && now - entry.LastStateSentTime < stateInterval && rotDelta < MinRotationDelta)
-                    continue;
-            }
-            else
-            {
-                if (!activeWeaponChanged && now - entry.LastStateSentTime < stateInterval &&
-                    posDeltaSqr < positionDeltaThreshold * positionDeltaThreshold && rotDelta < MinRotationDelta)
-                    continue;
-            }
+            // This is a cadence limit, not merely an idle-state suppression.
+            // Rotation/weapon changes used to bypass it and send at host FPS.
+            // Health and death events still broadcast immediately on their own paths.
+            if (now - entry.LastStateSentTime < stateInterval)
+                continue;
 
             entry.LastKnownPosition = position;
             entry.LastKnownRotation = rotation;
@@ -4009,6 +3987,7 @@ public sealed partial class AISyncService
             {
                 // AI 状态通常 10Hz；远端插值按实际到达间隔/抖动独立加缓冲，
                 // 不跟随本机发送频率，避免网络抖动时怪物冻住再瞬移。
+                _netInterp.useGlobalAiInterval = false;
                 _netInterp.adaptiveBackTime = true;
                 _netInterp.adaptiveMinBackTime = 0.08f;
                 _netInterp.adaptiveMaxBackTime = 0.3f;

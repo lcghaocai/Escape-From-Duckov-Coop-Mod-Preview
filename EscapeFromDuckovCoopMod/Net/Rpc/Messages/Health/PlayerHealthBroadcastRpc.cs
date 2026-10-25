@@ -36,7 +36,7 @@ public struct PlayerHealthBroadcastRpc : IRpcMessage
             Damage = default;
             Damage.Deserialize(reader);
         }
-        Buffs = PlayerBuffState.Read(reader);
+        Buffs = PlayerBuffState.Read(reader, optionalTailBytes: sizeof(double));
         Timestamp = reader.AvailableBytes >= 8 ? reader.GetDouble() : 0d;
     }
 }

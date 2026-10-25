@@ -12,6 +12,7 @@ static class Program
 
     public static void Main()
     {
+        Test("player health envelopes preserve null buffs and timestamp boundaries", PlayerHealthWireFormat);
         Test("health snapshots and unordered broadcasts use capture order", HealthCaptureOrder);
         Test("same-frame health changes retain the final state", SameFrameHealth);
         Test("AI metadata delay retains hits and kill credit while coalescing health", PendingHealth);
@@ -28,6 +29,62 @@ static class Program
         Test("real LiteNetLib loopback: seven clients, time budget, retained readers and exceptions", Loopback);
         Test("unreachable-host errors are aggregated", NetworkErrors);
         Console.WriteLine($"All {_passed} network scheduling checks passed.");
+    }
+
+    private static void PlayerHealthWireFormat()
+    {
+        var populated = new[] {
+            new PlayerBuffState { WeaponTypeId = 91, BuffId = 6, Layers = 3 },
+            new PlayerBuffState { WeaponTypeId = 92, BuffId = 7, Layers = 2 }
+        };
+        var cases = new PlayerBuffState[][] { null, Array.Empty<PlayerBuffState>(), populated };
+        var checks = 0;
+        foreach (var buffs in cases)
+        foreach (var stamp in new[] { 100.1, 0d, 4096d })
+        foreach (var legacy in new[] { false, true })
+        {
+            void Verify(PlayerBuffState[] actual, double timestamp, CoopPacketReader reader)
+            {
+                Check((actual == null) == (buffs == null), "Null buffs must mean no reconciliation, not clear all buffs");
+                if (buffs != null)
+                {
+                    Check(actual.Length == buffs.Length, "Buff count corrupted");
+                    for (var i = 0; i < buffs.Length; i++)
+                        Check(actual[i].WeaponTypeId == buffs[i].WeaponTypeId && actual[i].BuffId == buffs[i].BuffId &&
+                            actual[i].Layers == buffs[i].Layers, "Buff entry corrupted");
+                }
+                Check(timestamp == (legacy ? 0d : stamp), "Buff reader consumed timestamp bytes");
+                Check(reader.AvailableBytes == 0, "Health envelope left unread bytes");
+                checks++;
+            }
+            CoopPacketReader Reader(NetDataWriter writer)
+            {
+                var bytes = writer.CopyData();
+                // Pre-timestamp messages have the exact same prefix.
+                return new CoopPacketReader(bytes, 0, bytes.Length - (legacy ? sizeof(double) : 0));
+            }
+            var report = new PlayerHealthReportRpc { MaxHealth = 100, CurrentHealth = 61,
+                LifeId = "life", IsDead = false, Buffs = buffs, Timestamp = stamp };
+            var writer = new NetDataWriter();
+            report.Serialize(writer);
+            var reader = Reader(writer);
+            var decodedReport = new PlayerHealthReportRpc();
+            decodedReport.Deserialize(reader);
+            Check(decodedReport.CurrentHealth == 61 && decodedReport.LifeId == "life" && !decodedReport.IsDead,
+                "Owner health/death report corrupted");
+            Verify(decodedReport.Buffs, decodedReport.Timestamp, reader);
+
+            var broadcast = new PlayerHealthBroadcastRpc { PlayerId = "peer", MaxHealth = 100,
+                CurrentHealth = 61, Buffs = buffs, Timestamp = stamp };
+            writer.Reset();
+            broadcast.Serialize(writer);
+            reader = Reader(writer);
+            var decodedBroadcast = new PlayerHealthBroadcastRpc();
+            decodedBroadcast.Deserialize(reader);
+            Check(decodedBroadcast.PlayerId == "peer" && decodedBroadcast.CurrentHealth == 61, "Relay health corrupted");
+            Verify(decodedBroadcast.Buffs, decodedBroadcast.Timestamp, reader);
+        }
+        Console.WriteLine($"  {checks} health envelopes: null/empty/populated buffs, stamped and legacy");
     }
 
     private static void HealthCaptureOrder()

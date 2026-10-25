@@ -39,7 +39,7 @@ public struct PlayerHealthReportRpc : IRpcMessage
         }
         LifeId = reader.AvailableBytes > 0 ? reader.GetString() : string.Empty;
         IsDead = reader.AvailableBytes > 0 && reader.GetBool();
-        Buffs = PlayerBuffState.Read(reader);
+        Buffs = PlayerBuffState.Read(reader, optionalTailBytes: sizeof(double));
         Timestamp = reader.AvailableBytes >= 8 ? reader.GetDouble() : 0d;
     }
 }

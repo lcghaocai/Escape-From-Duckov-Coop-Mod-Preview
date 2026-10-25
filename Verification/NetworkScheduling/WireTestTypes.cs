@@ -31,3 +31,14 @@ namespace EscapeFromDuckovCoopMod
             throw new NotSupportedException("Nested Unity items are outside the wire-tail test");
     }
 }
+
+namespace EscapeFromDuckovCoopMod
+{
+    // These tests exercise the health envelope with HasDamage=false. Unity's
+    // DamageInfo conversion and damage payload wire format are not simulated.
+    public struct DamageForwardPayload
+    {
+        public void Serialize(NetDataWriter writer) => throw new NotSupportedException("Damage payload outside envelope test");
+        public void Deserialize(NetPacketReader reader) => throw new NotSupportedException("Damage payload outside envelope test");
+    }
+}
