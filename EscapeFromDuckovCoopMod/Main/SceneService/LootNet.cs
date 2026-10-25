@@ -1191,10 +1191,12 @@ namespace EscapeFromDuckovCoopMod;
             var typeId = item.TypeID;
             var stack = item.StackCount;
 
-            // Always treat client takes as full-slot transfers; stacking/splitting will be handled by explicit split RPCs later.
+            // 先把这次删除记为一个新 revision，再真正删除。
+            // 这样删除前构建、删除后才到达的旧快照会被客机判为 stale。
+            var takeVersion = NextVersion(inv);
             inv.RemoveAt(rpc.Position, out _);
 
-            BroadcastLootDelta(inv, rpc.Position, -1, 0, true);
+            BroadcastLootDelta(inv, rpc.Position, -1, 0, true, takeVersion);
             SendLootTakeOk(peer, rpc.Token, inv, rpc.Position, typeId, stack);
         }
         finally
@@ -1203,7 +1205,7 @@ namespace EscapeFromDuckovCoopMod;
         }
     }
 
-    private void BroadcastLootDelta(Inventory inv, int slot, int typeId, int count, bool cleared)
+    private void BroadcastLootDelta(Inventory inv, int slot, int typeId, int count, bool cleared, int version = 0)
     {
         var lm = LootManagerInstance;
         if (!IsServer || inv == null || lm == null) return;
@@ -1238,7 +1240,7 @@ namespace EscapeFromDuckovCoopMod;
         {
             Id = lm.BuildLootIdentifier(inv),
             IsSnapshot = false,
-            Version = NextVersion(inv),
+            Version = version > 0 ? version : NextVersion(inv),
             Slot = slot,
             Delta = delta
         };
@@ -1360,11 +1362,17 @@ namespace EscapeFromDuckovCoopMod;
 
         if (inv)
         {
-            var item = inv.GetItemAt(rpc.Slot);
-            if (rpc.TypeId < 0)
-                inv.RemoveAt(rpc.Slot, out _);
-            else if (item != null && item.TypeID == rpc.TypeId)
-                item.StackCount = Mathf.Max(1, rpc.Stack);
+            var applying = _applyingLootState;
+            _applyingLootState = true;
+            try
+            {
+                var item = inv.GetItemAt(rpc.Slot);
+                // 主机已经删除了整个槽位；客机必须按确认再删一次。
+                // 只依赖本地 RemoveAt 时，若快照稍后把物品恢复，就会表现为“可以一直拿”。
+                if (item != null && (rpc.TypeId < 0 || item.TypeID == rpc.TypeId))
+                    inv.RemoveAt(rpc.Slot, out _);
+            }
+            finally { _applyingLootState = applying; }
         }
 
         lm._cliPendingTake.Remove(rpc.Token);
