@@ -2,6 +2,9 @@ using Duckov.Buildings;
 using ItemStatsSystem.Data;
 using ItemStatsSystem;
 using Saves;
+using System;
+using System.Linq;
+using System.Reflection;
 
 namespace EscapeFromDuckovCoopMod;
 
@@ -41,16 +44,36 @@ internal static class SharedHomeDisplays
             SharedHome.Apply(() =>
             {
                 ItemTool.ApplySnapshot(display.Item, snapshot);
-                // ApplySnapshot 只改 Item 数据，Showcase 的装备模型/插槽视觉需要
-                // 原生 OnTreeChanged 才会重建；否则客机会看到假人装备消失。
-                try { AccessTools.Method(typeof(Showcase), "OnTreeChanged")?.Invoke(display, null); }
-                catch (Exception e) { CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] showcase refresh failed: {e.Message}"); }
+                RefreshShowcase(display);
             });
         }
         finally
         {
             if (item) item.DestroyTree();
             if (!display || Versions[display] == version) Pending.Remove(display);
+        }
+    }
+
+    private static void RefreshShowcase(Showcase display)
+    {
+        if (!display) return;
+        try
+        {
+            var method = typeof(Showcase)
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(m => string.Equals(m.Name, "OnTreeChanged", StringComparison.Ordinal));
+            if (method == null) return;
+
+            var parameters = method.GetParameters();
+            var args = new object[parameters.Length];
+            for (var i = 0; i < parameters.Length; i++)
+                if (parameters[i].ParameterType.IsValueType)
+                    args[i] = Activator.CreateInstance(parameters[i].ParameterType);
+            method.Invoke(display, args);
+        }
+        catch (Exception e)
+        {
+            CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] showcase refresh failed: {e.Message}");
         }
     }
 }
