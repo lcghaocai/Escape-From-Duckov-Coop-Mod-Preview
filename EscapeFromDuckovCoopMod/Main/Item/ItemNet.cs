@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -30,6 +30,9 @@ public sealed partial class ItemNet
     [ThreadStatic] public static bool InNetworkDrop;
 
     private readonly SnapshotReceiveQueue<uint, ItemDropSnapshotEntry> _snapshotStream = new();
+    // Live drops that arrived after the current drop-snapshot request started.
+    // A late reset must not delete them; the snapshot was built before they existed.
+    private readonly HashSet<uint> _dropsCreatedSinceSnapshot = new();
 
     private readonly Dictionary<uint, uint> _pendingByToken = new();
     private readonly HashSet<uint> _pendingPickups = new();
@@ -95,6 +98,7 @@ public sealed partial class ItemNet
     internal void Reset(bool preserveDropIds)
     {
         _snapshotStream.Clear();
+        _dropsCreatedSinceSnapshot.Clear();
         _pendingByToken.Clear();
         _pendingPickups.Clear();
         _serverDropSnapshots.Clear();
@@ -219,6 +223,7 @@ public sealed partial class ItemNet
 
         ItemTool.AddNetDropTag(agent ? agent.gameObject : item.gameObject, message.DropId);
         CoopSyncDatabase.Drops.Register(message.DropId, item, agent ? agent.gameObject : item.gameObject);
+        _dropsCreatedSinceSnapshot.Add(message.DropId);
         _nextDropId = Math.Max(_nextDropId, message.DropId + 1);
     }
 
@@ -361,6 +366,7 @@ public sealed partial class ItemNet
         }
 
         CoopSyncDatabase.Drops.Unregister(message.DropId);
+        _dropsCreatedSinceSnapshot.Remove(message.DropId);
     }
 
     public void Server_HandleDropSnapshotRequest(RpcContext context, ItemDropSnapshotRequestRpc message)
@@ -396,9 +402,12 @@ public sealed partial class ItemNet
     {
         if (_snapshotStream.ConsumeReset())
         {
-            _nextDropId = 1;
+            var keep = _dropsCreatedSinceSnapshot;
+            var oldEntries = CoopSyncDatabase.Drops.Entries
+                .Where(entry => entry != null && !keep.Contains(entry.DropId))
+                .ToArray();
 
-            foreach (var entry in CoopSyncDatabase.Drops.Entries.ToArray())
+            foreach (var entry in oldEntries)
             {
                 try
                 {
@@ -410,13 +419,19 @@ public sealed partial class ItemNet
                     {
                         entry.Item.DestroyTree();
                     }
+
+                    CoopSyncDatabase.Drops.Unregister(entry.DropId);
                 }
                 catch
                 {
                 }
             }
 
-            CoopSyncDatabase.Drops.Clear();
+            // Keep live drops that arrived after this snapshot request was sent.
+            // The snapshot was built before them, so clearing everything would
+            // make a just-thrown item disappear.
+            _nextDropId = keep.Count == 0 ? 1 : keep.Max() + 1;
+            keep.Clear();
             _pendingPickups.Clear();
         }
     }
