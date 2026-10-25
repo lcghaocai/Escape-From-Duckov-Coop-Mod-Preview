@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -61,6 +61,12 @@ public class SceneNet : MonoBehaviour
 
     // 记录已经“举手”的客户端（用 EndPoint 字符串，与现有 PlayerStatus 保持一致）
     public readonly HashSet<string> _srvGateReadyPids = new();
+    // 每个客户端举手时请求放行的场景 ID，放行时原样回显，避免多场景/子场景命名不一致导致客机一直等到超时。
+    private readonly Dictionary<string, string> _srvGateReadySids = new(StringComparer.OrdinalIgnoreCase);
+
+    // 客机等待主机放行的最长时间。主机切图时的资源卸载可能达到 20 秒以上，10 秒会提前进门。
+    private const float ClientGateTimeoutSeconds = 30f;
+    private const float ClientGateRetryInterval = 0.5f;
 
     // 所有端都使用主机广播的这份参与者 pid 列表（关键：统一 pid）
     public readonly List<string> sceneParticipantIds = new();
@@ -226,6 +232,7 @@ public class SceneNet : MonoBehaviour
         _srvLoadInProgress = true;
         _srvSceneGateOpen = false;
         _srvGateReadyPids.Clear();
+        _srvGateReadySids.Clear();
         _srvGateSid = sceneTargetId;
         // 主机本地执行加载
         AuthorizeLocalSceneLoad(sceneTargetId);
@@ -509,6 +516,13 @@ public class SceneNet : MonoBehaviour
         _srvPendingBeginLoad = false;
         _srvPendingSceneLoad = false;
         _localSceneLoadLaunched = false;
+        // 上一次加载失败/中途退出时，这几个状态没有对应场景加载完成事件来清理，
+        // 会永久卡住 Host_BeginSceneVote_Simple，表现为之后点地图完全没反应。
+        _srvLoadInProgress = false;
+        _srvSceneGateOpen = false;
+        _srvGateReadyPids.Clear();
+        _srvGateReadySids.Clear();
+        _srvGateSid = null;
         sceneVoteActive = false;
         sceneParticipantIds.Clear();
         sceneReady.Clear();
@@ -745,7 +759,13 @@ public class SceneNet : MonoBehaviour
         bool useLocation, string locationName, int beaconIndex = -1)
     {
         if (_srvPendingBeginLoad || _srvPendingSceneLoad || _srvLoadInProgress || SceneLoader.IsSceneLoading || TeleporterTravel.IsActive)
+        {
+            Debug.LogWarning(
+                $"[SCENE] Begin vote blocked: pendingBegin={_srvPendingBeginLoad} pendingLoad={_srvPendingSceneLoad} " +
+                $"loadInProgress={_srvLoadInProgress} sceneLoading={SceneLoader.IsSceneLoading} " +
+                $"teleporter={TeleporterTravel.IsActive} target='{targetSceneId}'");
             return;
+        }
         if (sceneVoteActive)
         {
             MModUI.ShowTip(CoopLocalization.Get("ui.sceneVote.alreadyActive"));
@@ -875,20 +895,34 @@ public class SceneNet : MonoBehaviour
                 await UniTask.Delay(100, ignoreTimeScale: true);
             if (!networkStarted || connectedPeer == null || generation != _clientGateGeneration) return;
 
-            var w = new NetDataWriter();
-            w.Put((byte)Op.SCENE_GATE_READY);
-            w.Put(localPlayerStatus?.EndPoint ?? string.Empty);
-            w.Put(sid ?? string.Empty);
-            connectedPeer.Send(w, DeliveryMethod.ReliableOrdered);
             WaitingSynchronizationUI.Instance?.Show();
-            _cliGateDeadline = Time.realtimeSinceStartup + 10f;
+            _cliGateDeadline = Time.realtimeSinceStartup + ClientGateTimeoutSeconds;
+            var nextReadyTime = 0f;
             while (networkStarted && connectedPeer != null && generation == _clientGateGeneration &&
-                !_cliSceneGateReleased && Time.realtimeSinceStartup < _cliGateDeadline)
+                   !_cliSceneGateReleased && Time.realtimeSinceStartup < _cliGateDeadline)
             {
+                // READY 可能因为主机尚未加载完、场景 ID 不一致或网络抖动而没有被处理；
+                // 这里周期性重发，主机侧按最后一次 READY 放行，避免单次丢失就等满超时。
+                if (Time.realtimeSinceStartup >= nextReadyTime)
+                {
+                    var peer = connectedPeer;
+                    if (peer == null) break;
+
+                    var w = new NetDataWriter();
+                    w.Put((byte)Op.SCENE_GATE_READY);
+                    w.Put(localPlayerStatus?.EndPoint ?? string.Empty);
+                    w.Put(sid ?? string.Empty);
+                    peer.Send(w, DeliveryMethod.ReliableOrdered);
+                    nextReadyTime = Time.realtimeSinceStartup + ClientGateRetryInterval;
+                }
+
                 SceneLoader.LoadingComment = CoopLocalization.Get("scene.waitingForHost");
                 await UniTask.Delay(100, ignoreTimeScale: true);
             }
-            CoopLogSystem.WriteNetworkDiagnostic($"[SCENE] Gate scene='{sid}' released={_cliSceneGateReleased} connected={connectedPeer != null}");
+
+            CoopLogSystem.WriteNetworkDiagnostic(
+                $"[SCENE] Gate scene='{sid}' released={_cliSceneGateReleased} connected={connectedPeer != null} " +
+                $"waited={Mathf.Max(0f, ClientGateTimeoutSeconds - (_cliGateDeadline - Time.realtimeSinceStartup)):0.0}s");
         }
         finally
         {
@@ -907,34 +941,79 @@ public class SceneNet : MonoBehaviour
         // 确保在主线程下一帧再去放行客户端，避免加载钩子里抢占资源导致卡住
         await UniTask.Yield();
 
-        // 放行已经举手的所有客户端
+        // 放行已经举手的所有客户端。按客机自己上报的 sid 回显，
+        // 避免主机 active scene 与客机 LevelManager 所在子场景命名不一致时客户端拒收。
         if (playerStatuses != null && playerStatuses.Count > 0)
             foreach (var kv in playerStatuses)
             {
                 var peer = kv.Key;
                 var st = kv.Value;
                 if (peer == null || st == null) continue;
-                if (_srvGateReadyPids.Contains(st.EndPoint))
-                    Server_SendGateRelease(peer, _srvGateSid);
+                if (!_srvGateReadyPids.Contains(st.EndPoint)) continue;
+                var releaseSid = _srvGateReadySids.TryGetValue(st.EndPoint, out var readySid) &&
+                                 !string.IsNullOrEmpty(readySid)
+                    ? readySid
+                    : _srvGateSid;
+                _srvGateReadySids[st.EndPoint] = releaseSid;
+                Server_SendGateRelease(peer, releaseSid);
             }
-
-        // 主机不阻塞：之后若有 SCENE_GATE_READY 迟到，就在接收处即刻单独放行 目前不想去写也没啥毛病
     }
 
     public void Server_HandleGateReady(NetPeer peer, string sid)
     {
         if (!IsServer || peer == null || string.IsNullOrEmpty(sid)) return;
-        if (!SceneLoader.IsSceneLoading && LevelManager.LevelInited &&
-            LocalPlayerManager.Instance.ComputeIsInGame(out var currentScene) &&
-            (currentScene == sid || MultiSceneCore.MainScene.HasValue && MultiSceneCore.MainSceneID == sid))
+
+        var playerId = Service.GetPlayerId(peer);
+        if (!string.IsNullOrEmpty(playerId))
+        {
+            _srvGateReadyPids.Add(playerId);
+            _srvGateReadySids[playerId] = sid;
+        }
+
+        if (string.IsNullOrEmpty(_srvGateSid)) _srvGateSid = sid;
+
+        // 主机已经进入关卡、且不是还停在 Base 时，直接放行；放行消息带客机自己的 sid。
+        if (Server_HostCanReleaseGate(sid))
         {
             Server_SendGateRelease(peer, sid);
+            CoopLogSystem.WriteNetworkDiagnostic($"[SCENE] Gate release -> {peer.EndPoint} sid='{sid}' (host ready)");
             return;
         }
-        if (string.IsNullOrEmpty(_srvGateSid)) _srvGateSid = sid;
-        if (!string.Equals(sid, _srvGateSid, StringComparison.OrdinalIgnoreCase)) return;
-        _srvGateReadyPids.Add(Service.GetPlayerId(peer));
-        if (_srvSceneGateOpen) Server_SendGateRelease(peer, sid);
+
+        // 主机还在加载：先记下，等 Server_SceneGateAsync 开门时统一放行。
+        CoopLogSystem.WriteNetworkDiagnostic(
+            $"[SCENE] Gate ready queued peer={peer.EndPoint} sid='{sid}' hostGateSid='{_srvGateSid}' " +
+            $"loading={SceneLoader.IsSceneLoading} inited={LevelManager.LevelInited} gateOpen={_srvSceneGateOpen}");
+    }
+
+    private bool Server_HostCanReleaseGate(string sid)
+    {
+        if (SceneLoader.IsSceneLoading || !LevelManager.LevelInited) return false;
+
+        var level = LevelManager.Instance;
+        if (level == null || level.MainCharacter == null) return false;
+
+        var manager = LocalPlayerManager.Instance;
+        if (manager == null || !manager.ComputeIsInGame(out var hostScene) || string.IsNullOrEmpty(hostScene))
+            return false;
+
+        if (string.Equals(hostScene, sid, StringComparison.OrdinalIgnoreCase)) return true;
+        if (MultiSceneCore.MainScene.HasValue &&
+            string.Equals(MultiSceneCore.MainSceneID, sid, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // 主机已经不在 Base，说明确实在关卡里；允许子场景命名差异，避免客机等满超时。
+        // 但主机还在 Base 时不能放行，否则客机会进入一张主机根本没加载的地图。
+        if (string.Equals(hostScene, SceneInfoCollection.BaseSceneID, StringComparison.OrdinalIgnoreCase))
+        {
+            CoopLogSystem.WriteNetworkDiagnostic(
+                $"[SCENE] Gate wait: host still in base, client sid='{sid}'");
+            return false;
+        }
+
+        CoopLogSystem.WriteNetworkDiagnostic(
+            $"[SCENE] Gate sid mismatch host='{hostScene}' client='{sid}', host in level -> release");
+        return true;
     }
 
     private void Server_SendGateRelease(NetPeer peer, string sid)
