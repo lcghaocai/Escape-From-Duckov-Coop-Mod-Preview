@@ -468,7 +468,12 @@ public sealed partial class AISyncService
             var positionDelta = position - entry.LastKnownPosition;
             var sampleDeltaTime = Mathf.Max(now - entry.LastStateSentTime, safeDeltaTime);
             var velocity = positionDelta / sampleDeltaTime;
-            var activeWeaponChanged = RefreshActiveWeapon(entry, cmc);
+            var activeWeaponChanged = false;
+            if (now >= entry.NextWeaponCheckTime)
+            {
+                activeWeaponChanged = RefreshActiveWeapon(entry, cmc);
+                entry.NextWeaponCheckTime = now + 0.5f;
+            }
 
             if (watchers == null || watchers.Count == 0)
             {

@@ -483,19 +483,19 @@ namespace EscapeFromDuckovCoopMod;
     {
         if (SharedHomeStorage.IsShared(inv)) Server_FlushWarehouseChanges();
         Server_EnsureInventoryHook(inv);
-        var slots = new LootSlotSnapshot[inv.Capacity];
+        var slots = new List<LootSlotSnapshot>(Mathf.Min(inv.Capacity, 128));
         for (var i = 0; i < inv.Capacity; i++)
         {
             var item = inv.GetItemAt(i);
-            slots[i] = item == null || IsQuestTagged(item)
-                ? new LootSlotSnapshot { HasItem = false }
-                : new LootSlotSnapshot
-                {
-                    HasItem = true,
-                    TypeId = item.TypeID,
-                    Stack = item.StackCount,
-                    Item = ItemTool.MakeSnapshot(item)
-                };
+            if (item == null || IsQuestTagged(item)) continue;
+            slots.Add(new LootSlotSnapshot
+            {
+                Slot = i,
+                HasItem = true,
+                TypeId = item.TypeID,
+                Stack = item.StackCount,
+                Item = ItemTool.MakeSnapshot(item)
+            });
         }
 
         return new LootStateRpc
@@ -504,7 +504,7 @@ namespace EscapeFromDuckovCoopMod;
             IsSnapshot = true,
             Version = GetCurrentVersion(inv),
             Capacity = inv.Capacity,
-            Snapshot = slots
+            Snapshot = slots.ToArray()
         };
     }
 
@@ -805,22 +805,28 @@ namespace EscapeFromDuckovCoopMod;
                     inv.SetCapacity(rpc.Capacity);
                 }
 
-                for (var i = 0; i < rpc.Capacity && i < rpc.Snapshot.Length; i++)
-                {
-                    var slot = rpc.Snapshot[i];
-                    if (!slot.HasItem)
-                    {
-                        var existing = inv.GetItemAt(i);
-                        if (existing != null && IsQuestTagged(existing))
-                            continue;
+                var entries = rpc.Snapshot ?? Array.Empty<LootSlotSnapshot>();
+                var present = new HashSet<int>();
+                foreach (var entry in entries)
+                    if (entry.HasItem && entry.Slot >= 0 && entry.Slot < rpc.Capacity)
+                        present.Add(entry.Slot);
 
-                        if (existing != null)
-                        {
-                            changed = true;
-                            inv.RemoveAt(i, out _);
-                        }
-                        continue;
-                    }
+                // 快照只带有物品的槽位；不在快照里的槽位才是空槽。
+                for (var i = 0; i < rpc.Capacity; i++)
+                {
+                    if (present.Contains(i)) continue;
+                    var existing = inv.GetItemAt(i);
+                    if (existing == null) continue;
+                    if (IsQuestTagged(existing)) continue;
+                    changed = true;
+                    inv.RemoveAt(i, out _);
+                }
+
+                foreach (var slot in entries)
+                {
+                    if (!slot.HasItem) continue;
+                    var i = slot.Slot;
+                    if (i < 0 || i >= rpc.Capacity) continue;
 
                     var targetSnap = slot.Item.TypeId == 0
                         ? new ItemSnapshot { TypeId = slot.TypeId, Stack = slot.Stack }
@@ -845,7 +851,7 @@ namespace EscapeFromDuckovCoopMod;
                     }
                     else
                     {
-                        inv.RemoveAt(i, out _);
+                        if (exist != null) inv.RemoveAt(i, out _);
                         try
                         {
                             var item = ItemTool.BuildItemFromSnapshot(targetSnap);
