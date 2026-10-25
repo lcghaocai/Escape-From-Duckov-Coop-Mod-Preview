@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -85,6 +85,12 @@ public class WeaponHandle
                 if (sqrDistance > sqrLimit)
                     continue;
             }
+
+            // AI 射击必须确认这台客机已经有该 AI 的 watcher/克隆；
+            // 否则会出现只有枪线、没有射击者模型。
+            if (evt.AiId != 0 && COOPManager.AI != null &&
+                !COOPManager.AI.Server_ShouldSendAiFireEvent(peer, evt.AiId))
+                continue;
 
             CoopTool.SendRpcTo(peer, in evt);
         }
@@ -491,9 +497,20 @@ public class WeaponHandle
 
         CharacterMainControl controller = null;
         ItemAgent_Gun gun = null;
-        if (clientRemoteCharacters.TryGetValue(message.ShooterId, out var who) && who)
+        var hasRemote = clientRemoteCharacters.TryGetValue(message.ShooterId, out var who) && who;
+        if (message.AiId != 0)
         {
-             controller = who.GetComponent<CharacterMainControl>();
+            var ai = COOPManager.AI?.TryGetCharacter(message.AiId);
+            if (!ai) return; // 模型还没到，先不画枪线，避免“有枪线没有人”
+        }
+        else if (!hasRemote)
+        {
+            return; // 远端玩家模型还没创建，同样不要先画枪线
+        }
+
+        if (hasRemote)
+        {
+            controller = who.GetComponent<CharacterMainControl>();
             gun = controller ? controller.GetGun() : null;
         }
 

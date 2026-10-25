@@ -27,7 +27,7 @@ public struct PlayerBuffState
         if (reader.AvailableBytes < sizeof(ushort))
             throw new System.FormatException("Truncated player buff count");
         var count = reader.GetUShort();
-        if (count > reader.AvailableBytes / (3 * sizeof(int)))
+        if (count > 512 || count > reader.AvailableBytes / (3 * sizeof(int)))
             throw new System.FormatException("Truncated player buff entries");
         var result = new PlayerBuffState[count];
         for (var i = 0; i < result.Length; i++)
