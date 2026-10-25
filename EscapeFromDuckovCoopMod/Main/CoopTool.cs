@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -478,7 +478,7 @@ public static class CoopTool
 
             if (!string.IsNullOrEmpty(hostSceneId) && !string.IsNullOrEmpty(peerScene))
             {
-                if (peerScene == hostSceneId)
+                if (SceneNet.SceneIdsMatch(peerScene, hostSceneId))
                 {
                     var pid = NetService.Instance.GetPlayerId(peer);
                     if (!string.IsNullOrEmpty(pid)) list.Add(pid);

@@ -392,7 +392,7 @@ public class SceneNet : MonoBehaviour
         mySceneId = mySceneId ?? string.Empty;
 
         if (sceneLocationName != "OnPointerClick" && ver >= 2 && !string.IsNullOrEmpty(hostSceneId) && !string.IsNullOrEmpty(mySceneId))
-            if (!string.Equals(hostSceneId, mySceneId, StringComparison.Ordinal))
+            if (!SceneIdsMatch(hostSceneId, mySceneId))
             {
                 Debug.Log($"[SCENE] vote: ignore (diff scene) host='{hostSceneId}' me='{mySceneId}'");
                 return;
@@ -489,13 +489,12 @@ public class SceneNet : MonoBehaviour
         if (!_cliForceSpawnAtHost) return;
         if (sceneLocationName != "OnPointerClick") return;
         if (IsBaseScene(sceneId)) return;
-        if (!IsSpawnSceneMatch(sceneTargetId, sceneId))
+        if (!SceneIdsMatch(sceneTargetId, sceneId))
         {
             CoopLogSystem.WriteNetworkDiagnostic(
                 $"[SCENE] SpawnTogether ignored host ready: target='{sceneTargetId}' host='{sceneId}'");
             return;
-        }
-        if (_cliHostReadyReceived) return;
+        }        if (_cliHostReadyReceived) return;
 
         _cliHostReadyReceived = true;
         _cliHostSpawnPosition = pos;
@@ -506,11 +505,12 @@ public class SceneNet : MonoBehaviour
         Client_TrySnapToHostAnchor();
     }
 
-    private static bool IsSpawnSceneMatch(string targetSceneId, string hostSceneId)
+    internal static bool SceneIdsMatch(string targetSceneId, string hostSceneId)
     {
         if (string.IsNullOrEmpty(targetSceneId) || string.IsNullOrEmpty(hostSceneId)) return false;
         if (string.Equals(targetSceneId, hostSceneId, StringComparison.OrdinalIgnoreCase)) return true;
-        // 目标场景和 active scene 可能一个带 _Main、一个不带，或者主场景/子场景命名不同。
+        // Base_SceneV2 和 Base 都算基地；Level_X 和 Level_X_Main 也算同一张图。
+        if (IsBaseScene(targetSceneId) && IsBaseScene(hostSceneId)) return true;
         return targetSceneId.StartsWith(hostSceneId, StringComparison.OrdinalIgnoreCase) ||
                hostSceneId.StartsWith(targetSceneId, StringComparison.OrdinalIgnoreCase);
     }
