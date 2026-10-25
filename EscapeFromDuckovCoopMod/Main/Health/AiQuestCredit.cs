@@ -92,7 +92,8 @@ internal static class AiQuestCredit
             {
                 Id = entry.Id, MaxHealth = entry.MaxHealth, CurrentHealth = entry.CurrentHealth,
                 BodyArmor = entry.BodyArmor, HeadArmor = entry.HeadArmor, IsDead = true,
-                HasDamage = true, Damage = evidence[0], AssistCredit = true, QuestEvidence = evidence
+                HasDamage = true, Damage = evidence[0], AssistCredit = true, QuestEvidence = evidence,
+                Timestamp = Time.unscaledTimeAsDouble
             };
             CoopTool.SendRpcTo(peer, in message);
         }

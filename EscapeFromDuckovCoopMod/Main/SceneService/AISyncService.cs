@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -283,6 +283,7 @@ public sealed partial class AISyncService
             _clientReplicaRecoveryTimes.Clear();
             _clientLastDamage.Clear();
             _clientHealthOrder.Clear();
+            _clientHealthTimestamp.Clear();
             _clientPendingHealth.Clear();
             _clientEntryBufferVersion = -1;
             _clientAnchorFrame = -1;
@@ -2120,7 +2121,8 @@ public sealed partial class AISyncService
             IsDead = entry.Status == AIStatus.Dead,
             HasDamage = damage.HasValue,
             Damage = damage ?? default,
-            KillerCredit = false
+            KillerCredit = false,
+            Timestamp = Time.unscaledTimeAsDouble
         };
 
         var signature = ComputeHealthSignature(in message);
@@ -2169,7 +2171,8 @@ public sealed partial class AISyncService
             HasDamage = true,
             Damage = payload,
             KillerCredit = true,
-            QuestEvidence = SharedHome.Active ? null : AiQuestCredit.Evidence(entry.Id, peer)
+            QuestEvidence = SharedHome.Active ? null : AiQuestCredit.Evidence(entry.Id, peer),
+            Timestamp = Time.unscaledTimeAsDouble
         };
 
         var writer = RpcWriterPool.Rent();

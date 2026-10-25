@@ -2,7 +2,7 @@ using LiteNetLib.Utils;
 
 namespace EscapeFromDuckovCoopMod;
 
-[Rpc(Op.AI_HEALTH_BROADCAST, DeliveryMethod.ReliableOrdered, RpcDirection.ServerToClient)]
+[Rpc(Op.AI_HEALTH_BROADCAST, DeliveryMethod.ReliableUnordered, RpcDirection.ServerToClient)]
 public struct AIHealthBroadcastRpc : IRpcMessage
 {
     public int Id;
@@ -17,6 +17,7 @@ public struct AIHealthBroadcastRpc : IRpcMessage
     public float ConfirmedDamage;
     public bool AssistCredit;
     public DamageForwardPayload[] QuestEvidence;
+    public double Timestamp;
 
     public void Serialize(NetDataWriter writer)
     {
@@ -35,6 +36,7 @@ public struct AIHealthBroadcastRpc : IRpcMessage
         var count = Math.Min(QuestEvidence?.Length ?? 0, AiQuestCredit.MaxEvidence);
         writer.Put((byte)count);
         for (var i = 0; i < count; i++) QuestEvidence[i].Serialize(writer);
+        writer.Put(Timestamp);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -58,5 +60,6 @@ public struct AIHealthBroadcastRpc : IRpcMessage
         if (count > AiQuestCredit.MaxEvidence) throw new InvalidOperationException("Invalid AI quest evidence count");
         QuestEvidence = count == 0 ? null : new DamageForwardPayload[count];
         for (var i = 0; i < count; i++) QuestEvidence[i].Deserialize(reader);
+        Timestamp = reader.AvailableBytes >= 8 ? reader.GetDouble() : 0d;
     }
 }

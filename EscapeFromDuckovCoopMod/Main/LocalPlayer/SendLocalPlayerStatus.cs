@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -37,6 +37,8 @@ public class SendLocalPlayerStatus : MonoBehaviour
     private int _lastPlayerStatusSignature;
     private bool _hasLastPlayerStatusSignature;
     private float _nextVehiclePositionLogTime;
+    private float _nextAnimationSendTime;
+    private const float AnimationSyncInterval = 0.1f;
 
     public void Init()
     {
@@ -202,6 +204,12 @@ public class SendLocalPlayerStatus : MonoBehaviour
 
         var mainControl = CharacterMainControl.Main;
         if (mainControl == null) return;
+
+        // 动画参数不需要跟位置一样 30~66Hz；10Hz 足够驱动远端插值，
+        // 可以显著减少主机转发和 frp 的持续发包量。
+        var now = Time.unscaledTime;
+        if (now < _nextAnimationSendTime) return;
+        _nextAnimationSendTime = now + AnimationSyncInterval;
 
         var source = ResolveLocalControlSource(mainControl);
         if (!source) source = mainControl;

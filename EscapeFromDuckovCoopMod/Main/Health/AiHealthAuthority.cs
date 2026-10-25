@@ -8,6 +8,7 @@ public sealed partial class AISyncService
     private static readonly System.Reflection.FieldInfo FinalDamageProcessors = AccessTools.Field(typeof(Health), "finalDamageProcessFuncs");
     private readonly HealthSnapshotOrder _clientHealthOrder = new();
     private readonly Dictionary<int, (AIHealthBroadcastRpc Message, long Order)> _clientPendingHealth = new();
+    private readonly Dictionary<int, double> _clientHealthTimestamp = new();
 
     public void Client_HandleHealthBroadcast(AIHealthBroadcastRpc message)
     {
@@ -25,6 +26,12 @@ public sealed partial class AISyncService
     private void Client_ApplyHealthBroadcast(AISyncEntry entry, AIHealthBroadcastRpc message, long order)
     {
         if (!_clientHealthOrder.TryApply(entry.Id, order)) return;
+        if (message.Timestamp > 0d)
+        {
+            if (_clientHealthTimestamp.TryGetValue(entry.Id, out var lastTimestamp) && message.Timestamp <= lastTimestamp)
+                return;
+            _clientHealthTimestamp[entry.Id] = message.Timestamp;
+        }
         if (message.MaxHealth > 0f) entry.MaxHealth = message.MaxHealth;
         entry.CurrentHealth = message.CurrentHealth;
         entry.BodyArmor = message.BodyArmor;
