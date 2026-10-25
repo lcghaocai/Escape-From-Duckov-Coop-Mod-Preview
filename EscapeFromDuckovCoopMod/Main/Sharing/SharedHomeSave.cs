@@ -41,7 +41,7 @@ internal static class SharedHomeSave
             if (!ES3File.cachedFiles.TryGetValue(SavesSystem.CurrentFilePath, out var source))
                 throw new InvalidOperationException("Shared home save cache is unavailable");
             var selected = new ES3File(false);
-            if (full) SharedHomeQuests.ConsumeSuppressQuestDataCapture();
+            if (full) SharedHomeQuests.ConsumeForceFullQuestData();
             void Add(string key, object value)
             {
                 var single = new ES3File(false);
@@ -55,9 +55,9 @@ internal static class SharedHomeSave
             {
                 // Live warehouse changes already use transactional loot packets.
                 if (!full && key.StartsWith("Inventory/PlayerStorage")) continue;
-                if (!full && key == "QuestData" && SharedHomeQuests.ConsumeSuppressQuestDataCapture())
+                if (!full && key == "QuestData" && !SharedHomeQuests.ConsumeForceFullQuestData())
                 {
-                    // 任务进度已经用 Kind=12 单独广播；只更新发布基线，避免下次又整包下发。
+                    // 普通任务进度已经用 Kind=12 单独广播；只更新发布基线，避免下次又整包下发。
                     var quiet = new ES3File(false);
                     quiet.Save(key, source.Load(key));
                     PublishedValues[key] = quiet.LoadRawBytes();

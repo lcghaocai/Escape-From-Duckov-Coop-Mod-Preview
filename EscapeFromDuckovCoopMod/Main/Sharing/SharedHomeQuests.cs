@@ -13,21 +13,38 @@ internal static class SharedHomeQuests
 {
     private static readonly Dictionary<string, object> Baselines = new();
     private static bool _reloadPending;
-    private static bool _suppressQuestDataCapture;
+    private static bool _forceFullQuestData;
     private static float _nextReloadTime;
     private const float ReloadCoalesceSeconds = 0.5f;
 
     internal static void Init()
     {
-        Quest.onQuestStatusChanged += _ => SharedHome.MarkDirty();
-        Quest.onQuestActivated += _ => SharedHome.MarkDirty();
+        Quest.onQuestStatusChanged += _ =>
+        {
+            _forceFullQuestData = true;
+            SharedHome.MarkDirty();
+        };
+        Quest.onQuestActivated += _ =>
+        {
+            _forceFullQuestData = true;
+            SharedHome.MarkDirty();
+        };
         QuestTask.OnTaskStatusChanged += Changed;
     }
     private static string Key(QuestTask task) => task.Master.ID + ":" + task.ID;
     internal static void Changed(QuestTask task)
     {
         if (!task || !task.Master || !SharedHome.Active) return;
-        if (!SharedHome.Guest) { SharedHome.MarkDirty(); return; }
+        if (!SharedHome.Guest)
+        {
+            if (!SharedHome.Applying)
+            {
+                if (task.IsFinished()) _forceFullQuestData = true;
+                else Server_BroadcastTask(task);
+            }
+            SharedHome.MarkDirty();
+            return;
+        }
         var key = Key(task);
         var value = task.GenerateSaveData();
         if (!SharedHome.Applying && Baselines.TryGetValue(key, out var before) && !Equals(before, value))
@@ -55,17 +72,16 @@ internal static class SharedHomeQuests
             value
         }));
         SharedHome.SendPrivate(12, data);
-
-        // 任务尚未完成时，QuestData 的变化只是这一条进度；本次 Capture 跳过整份 QuestData。
-        // 完成/激活仍走完整快照，保证任务列表状态正确。
-        if (!task.IsFinished())
-            _suppressQuestDataCapture = true;
     }
 
-    internal static bool ConsumeSuppressQuestDataCapture()
+    /// <summary>
+    /// 只有任务激活/完成/状态变化才允许整份 QuestData 下发；
+    /// 普通进度/计时变化由 Kind=12 增量处理。
+    /// </summary>
+    internal static bool ConsumeForceFullQuestData()
     {
-        if (!_suppressQuestDataCapture) return false;
-        _suppressQuestDataCapture = false;
+        if (!_forceFullQuestData) return false;
+        _forceFullQuestData = false;
         return true;
     }
 

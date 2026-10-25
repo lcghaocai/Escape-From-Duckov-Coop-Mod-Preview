@@ -74,7 +74,6 @@ internal static class SharedHomeActions
                 }
                 else break;
                 AccessTools.Method(typeof(Duckov.Quests.Task), "ReportStatusChanged").Invoke(task, null);
-                SharedHomeQuests.Server_BroadcastTask(task);
                 break;
             case "taskInteract":
                 FindQuest(args)?.Tasks.FirstOrDefault(t => t.ID == (int)args["task"])?.Interact();
