@@ -38,7 +38,14 @@ internal static class SharedHomeDisplays
             if (!display || Versions[display] != version) return;
             var snapshot = item ? ItemTool.MakeSnapshot(item) : new ItemSnapshot
                 { TypeId = display.Item.TypeID, Stack = 1, InventoryCapacity = display.Inventory ? display.Inventory.Capacity : 0 };
-            SharedHome.Apply(() => ItemTool.ApplySnapshot(display.Item, snapshot));
+            SharedHome.Apply(() =>
+            {
+                ItemTool.ApplySnapshot(display.Item, snapshot);
+                // ApplySnapshot 只改 Item 数据，Showcase 的装备模型/插槽视觉需要
+                // 原生 OnTreeChanged 才会重建；否则客机会看到假人装备消失。
+                try { AccessTools.Method(typeof(Showcase), "OnTreeChanged")?.Invoke(display, null); }
+                catch (Exception e) { CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] showcase refresh failed: {e.Message}"); }
+            });
         }
         finally
         {
