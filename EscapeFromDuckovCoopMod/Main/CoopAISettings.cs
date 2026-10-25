@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -53,7 +53,7 @@ public sealed class CoopAISettings : MonoBehaviour
         if (net != null)
         {
             net.broadcastInterval = GeneralSettings.BroadcastInterval;
-            net.syncInterval = GeneralSettings.SyncInterval;
+            net.SetConfiguredSyncInterval(GeneralSettings.SyncInterval);
         }
 
         COOPManager.FriendlyFire?.OnGeneralSettingsApplied(GeneralSettings);
@@ -74,7 +74,7 @@ public sealed class CoopAISettings : MonoBehaviour
 public sealed class CoopGeneralSettings
 {
     public float BroadcastInterval = 5f;
-    public float SyncInterval = 0.015f;
+    public float SyncInterval = 0.05f;
     public float ProjectileSyncMaxDistance = 120f;
     public bool TeleporterSpawnTogether = false;
     public bool FriendlyFirePlayers = false;
@@ -87,7 +87,7 @@ public sealed class CoopGeneralSettings
     {
         var clone = Clone();
         clone.BroadcastInterval = Mathf.Clamp(clone.BroadcastInterval, 1f, 30f);
-        clone.SyncInterval = Mathf.Clamp(clone.SyncInterval, 0.01f, 0.1f);
+        clone.SyncInterval = Mathf.Clamp(clone.SyncInterval, 0.0167f, 0.1f);
         clone.ProjectileSyncMaxDistance = Mathf.Clamp(
             clone.ProjectileSyncMaxDistance <= 0f ? 120f : clone.ProjectileSyncMaxDistance,
             0f,

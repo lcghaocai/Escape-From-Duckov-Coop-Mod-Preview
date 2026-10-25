@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using Cysharp.Threading.Tasks;
@@ -9,11 +9,11 @@ namespace EscapeFromDuckovCoopMod
     {
         private const float PlayerPositionBackTime = 0.04f;
         private const float PlayerPositionBufferMultiplier = 0.5f;
-        private const float PlayerPositionMaxExtrapolate = 0.24f;
-        private const float PlayerPositionHardSnapDistance = 4f;
+        private const float PlayerPositionMaxExtrapolate = 0.35f;
+        private const float PlayerPositionHardSnapDistance = 8f;
         private const float PlayerPositionCatchupSpeed = 0.3f;
         private const float PlayerPositionCatchupThreshold = 0.04f;
-        private const float PlayerAdaptiveMaxBackTime = 0.18f;
+        private const float PlayerAdaptiveMaxBackTime = 0.35f;
         private const float PlayerAdaptiveIntervalMultiplier = 1.25f;
         private const float PlayerAdaptiveJitterMultiplier = 3f;
         private const float PlayerAnimationBackTime = 0.04f;
@@ -37,7 +37,7 @@ namespace EscapeFromDuckovCoopMod
             interp.bufferTimeMultiplier = PlayerPositionBufferMultiplier;
             interp.maxExtrapolate = PlayerPositionMaxExtrapolate;
             interp.hardSnapDistance = PlayerPositionHardSnapDistance;
-            interp.sendInterval = Mathf.Clamp(NetService.Instance?.syncInterval ?? 0.015f, 0.01f, 0.05f);
+            interp.sendInterval = Mathf.Clamp(NetService.Instance?.syncInterval ?? 0.05f, 0.02f, 0.1f);
             interp.useGlobalAiInterval = false;
             interp.adaptiveBackTime = true;
             interp.adaptiveMinBackTime = PlayerPositionBackTime;

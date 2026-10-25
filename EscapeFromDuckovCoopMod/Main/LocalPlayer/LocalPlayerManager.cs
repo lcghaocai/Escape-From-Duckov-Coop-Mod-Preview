@@ -579,6 +579,7 @@ public class PlayerStatus
     private NetService Service => NetService.Instance;
 
     public int Latency { get; set; }
+    public int Jitter { get; set; }
     public bool IsInGame { get; set; }
     public string EndPoint { get; set; }
     public string PlayerName { get; set; }

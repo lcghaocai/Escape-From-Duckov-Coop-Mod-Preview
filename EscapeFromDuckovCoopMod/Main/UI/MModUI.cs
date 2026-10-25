@@ -70,6 +70,8 @@ public class MModUI : MonoBehaviour
 
     private readonly Dictionary<string, GameObject> _hostEntries = new();
     private readonly Dictionary<string, GameObject> _playerEntries = new();
+    private readonly Dictionary<string, TMP_Text> _playerPingTexts = new();
+    private float _nextPlayerPingUpdateTime;
     private readonly HashSet<string> _displayedPlayerIds = new();  // 缓存已显示的玩家ID
 
     // Steam相关字段
@@ -1623,6 +1625,8 @@ public class MModUI : MonoBehaviour
             Debug.Log($"[MModUI] 玩家列表已更新，重建UI (当前: {currentPlayerIds.Count}, 之前: {_displayedPlayerIds.Count})");
         }
 
+        UpdatePlayerPingTexts(playerStatusesToDisplay);
+
         if (!needsRebuild)
             return;
 
@@ -1630,6 +1634,7 @@ public class MModUI : MonoBehaviour
         foreach (Transform child in _components.PlayerListContent)
             Destroy(child.gameObject);
         _playerEntries.Clear();
+        _playerPingTexts.Clear();
 
         // 更新缓存
         _displayedPlayerIds.Clear();
@@ -1687,9 +1692,10 @@ public class MModUI : MonoBehaviour
         var infoRow = CreateHorizontalGroup(entry.transform, "Info");
         CreateText("ID", infoRow.transform, CoopLocalization.Get("ui.playerStatus.id") + ": " + displayId, 13, ModernColors.TextSecondary);
 
-        var pingText = CreateText("Ping", infoRow.transform, $"{status.Latency}ms", 13,
+        var pingText = CreateText("Ping", infoRow.transform, FormatPing(status), 13,
             status.Latency < 50 ? ModernColors.Success :
             status.Latency < 100 ? ModernColors.Warning : ModernColors.Error);
+        _playerPingTexts[status.EndPoint] = pingText;
 
         var stateText = CreateText("State", infoRow.transform, status.IsInGame ? CoopLocalization.Get("ui.playerStatus.inGameStatus") : CoopLocalization.Get("ui.playerStatus.idle"), 13,
             status.IsInGame ? ModernColors.Success : ModernColors.TextSecondary);
@@ -1708,6 +1714,30 @@ public class MModUI : MonoBehaviour
             {
                 Service?.KickPlayer(status.EndPoint);
             }, 90, ModernColors.Error, 36, 14);
+        }
+    }
+
+    private static string FormatPing(PlayerStatus status)
+    {
+        if (status == null) return string.Empty;
+        return status.Jitter > 0
+            ? $"{status.Latency}ms ±{status.Jitter}ms"
+            : $"{status.Latency}ms";
+    }
+
+    private void UpdatePlayerPingTexts(List<PlayerStatus> statuses)
+    {
+        if (statuses == null || _playerPingTexts.Count == 0) return;
+        if (Time.unscaledTime < _nextPlayerPingUpdateTime) return;
+        _nextPlayerPingUpdateTime = Time.unscaledTime + 0.5f;
+
+        foreach (var status in statuses)
+        {
+            if (status == null || string.IsNullOrEmpty(status.EndPoint)) continue;
+            if (!_playerPingTexts.TryGetValue(status.EndPoint, out var text) || !text) continue;
+            text.text = FormatPing(status);
+            text.color = status.Latency < 50 ? ModernColors.Success :
+                status.Latency < 100 ? ModernColors.Warning : ModernColors.Error;
         }
     }
 

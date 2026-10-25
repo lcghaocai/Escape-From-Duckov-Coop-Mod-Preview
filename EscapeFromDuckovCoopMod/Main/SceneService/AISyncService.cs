@@ -4011,6 +4011,17 @@ public sealed partial class AISyncService
                 _netInterp.hardSnapDistance = 12f;
                 _netInterp.sendInterval = 0.05f;
             }
+            else if (_netInterp != null)
+            {
+                // AI 状态通常 10Hz；远端插值按实际到达间隔/抖动独立加缓冲，
+                // 不跟随本机发送频率，避免网络抖动时怪物冻住再瞬移。
+                _netInterp.adaptiveBackTime = true;
+                _netInterp.adaptiveMinBackTime = 0.08f;
+                _netInterp.adaptiveMaxBackTime = 0.3f;
+                _netInterp.maxExtrapolate = 0.3f;
+                _netInterp.hardSnapDistance = 8f;
+                _netInterp.sendInterval = 0.1f;
+            }
             if (_tag)
                 _tag.Id = id;
             if (_health)

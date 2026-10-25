@@ -15,6 +15,7 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         {
             BroadcastReceiveEnabled = true,
             UpdateTime = 1,
+            PingInterval = 500,
             EnableStatistics = true
         };
     }

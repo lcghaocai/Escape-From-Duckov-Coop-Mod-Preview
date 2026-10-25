@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -105,7 +105,7 @@ public class ModBehaviourF : MonoBehaviour
     public string status => Service?.status;
     public int port => Service?.port ?? 0;
     public float broadcastInterval => Service?.broadcastInterval ?? 5f;
-    public float syncInterval => Service?.syncInterval ?? 0.015f; // =========== Mod开发者注意现在是TI版本也就是满血版无同步延迟，0.03 ~33ms ===================
+    public float syncInterval => Service?.syncInterval ?? 0.05f; // 连续状态最多 20Hz
 
     public Dictionary<NetPeer, GameObject> remoteCharacters => Service?.remoteCharacters;
     public Dictionary<NetPeer, PlayerStatus> playerStatuses => Service?.playerStatuses;
@@ -211,6 +211,8 @@ public class ModBehaviourF : MonoBehaviour
                     broadcastTimer = 0f;
                 }
             }
+
+            Service?.UpdateAdaptiveSyncInterval();
 
             syncTimer += Time.deltaTime;
             if (syncTimer >= syncInterval)
