@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -151,6 +151,10 @@ public class LocalPlayerManager : MonoBehaviour
         {
             sceneId = SceneInfoCollection.BaseSceneID; // "Base"
         }
+
+        // Base 场景的 active scene 名可能是 Base_SceneV2 之类的变体，统一归一成 BaseSceneID。
+        if (SceneNet.IsBaseScene(sceneId))
+            sceneId = SceneInfoCollection.BaseSceneID;
 
         // 4) 只要有一个非空 sceneId，就认为“在游戏中”
         return !string.IsNullOrEmpty(sceneId);

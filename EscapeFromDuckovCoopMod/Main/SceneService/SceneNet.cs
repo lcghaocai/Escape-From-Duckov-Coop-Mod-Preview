@@ -905,7 +905,7 @@ public class SceneNet : MonoBehaviour
     {
         if (!networkStarted || IsServer) return;
         var sid = string.IsNullOrEmpty(sceneId) ? TryGuessActiveSceneId() : sceneId;
-        if (string.Equals(sid, SceneInfoCollection.BaseSceneID, StringComparison.OrdinalIgnoreCase)) return;
+        if (IsBaseScene(sid)) return;
         var generation = ++_clientGateGeneration;
         _cliGateSid = sid;
         _cliSceneGateReleased = false;
@@ -1007,6 +1007,16 @@ public class SceneNet : MonoBehaviour
             $"loading={SceneLoader.IsSceneLoading} inited={LevelManager.LevelInited} gateOpen={_srvSceneGateOpen}");
     }
 
+    internal static bool IsBaseScene(string sceneId)
+    {
+        if (string.IsNullOrEmpty(sceneId)) return false;
+        if (string.Equals(sceneId, SceneInfoCollection.BaseSceneID, StringComparison.OrdinalIgnoreCase)) return true;
+        // 游戏在 Base 场景里实际拿到的 active scene 名可能是 Base_SceneV2 之类的变体；
+        // 只比较 BaseSceneID 会把 Base 误判成关卡，导致主机还在基地就给客机放行。
+        return sceneId.StartsWith("Base_Scene", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(sceneId, "Base", StringComparison.OrdinalIgnoreCase);
+    }
+
     private bool Server_HostCanReleaseGate(string sid)
     {
         if (SceneLoader.IsSceneLoading || !LevelManager.LevelInited) return false;
@@ -1025,10 +1035,10 @@ public class SceneNet : MonoBehaviour
 
         // 主机已经不在 Base，说明确实在关卡里；允许子场景命名差异，避免客机等满超时。
         // 但主机还在 Base 时不能放行，否则客机会进入一张主机根本没加载的地图。
-        if (string.Equals(hostScene, SceneInfoCollection.BaseSceneID, StringComparison.OrdinalIgnoreCase))
+        if (IsBaseScene(hostScene))
         {
             CoopLogSystem.WriteNetworkDiagnostic(
-                $"[SCENE] Gate wait: host still in base, client sid='{sid}'");
+                $"[SCENE] Gate wait: host still in base, client sid='{sid}' hostScene='{hostScene}'");
             return false;
         }
 

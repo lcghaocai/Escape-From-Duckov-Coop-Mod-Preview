@@ -31,7 +31,7 @@ internal static class Patch_Level_StartInit_Gate
         if (SharedHomeCharacterCreation.Creating || SharedHomeCharacterCreation.Joining) return true;
         var sid = SceneInfoCollection.GetSceneID(__instance.gameObject.scene.buildIndex);
         if (LocalAppearanceTravel.Allows(sid)) return true;
-        if (string.Equals(sid, SceneInfoCollection.BaseSceneID, StringComparison.OrdinalIgnoreCase))
+        if (SceneNet.IsBaseScene(sid))
         {
             WaitingSynchronizationUI.Instance?.Hide();
             CoopLogSystem.WriteNetworkDiagnostic("[SCENE] Returning to base: original level initialization, no host gate");
