@@ -93,3 +93,4 @@ Review follow-up: 1.4.2.5
 - Player Buff reconciliation moved out of unordered health messages into PLAYER_BUFF_SNAPSHOT (199). Snapshot, player Buff report and broadcast share ordered channel 0. Local snapshots are throttled to once per 3 seconds; health retains its existing fast path.
 - User-excluded player damage request throttling is byte-for-byte unchanged.
 - Release build succeeded; all 20 scheduling/wire checks passed. No multiplayer game test performed. Host and all clients must use 1.4.2.5.
+- Integrated upstream 47a5c23 before push: preserve remote clone position correction and post-load snapping, retaining main-scene identity and destination initialization guards.

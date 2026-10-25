@@ -27,7 +27,7 @@ public class SceneNet : MonoBehaviour
     public string _sceneReadySidSent;
     private string _sceneReadyPendingSid;
     private float _sceneReadyEarliestTime;
-    private const float SceneReadySettleSeconds = 0.35f;
+    private const float SceneReadySettleSeconds = 0.75f;
     public bool sceneVoteActive;
     public string sceneTargetId; // 统一的目标 SceneID
     public string sceneCurtainGuid; // 过场 GUID，可为空
@@ -491,8 +491,6 @@ public class SceneNet : MonoBehaviour
 
     public void Client_OnRemoteSceneReady(string playerId, string sceneId, Vector3 pos, Quaternion rot, string mainSceneId = null)
     {
-        if (!_cliForceSpawnAtHost) return;
-        if (sceneLocationName != "OnPointerClick") return;
         if (IsBaseScene(sceneId)) return;
         if (!SceneIdsMatch(sceneTargetId, sceneId) && !SceneIdsMatch(sceneTargetId, mainSceneId))
         {
@@ -500,15 +498,33 @@ public class SceneNet : MonoBehaviour
                 $"[SCENE] SpawnTogether ignored host ready: target='{sceneTargetId}' host='{sceneId}' main='{mainSceneId}'");
             return;
         }
-        if (_cliHostReadyReceived) return;
+
+        var fromHost = !string.IsNullOrEmpty(playerId) &&
+                       playerId.StartsWith("Host:", StringComparison.OrdinalIgnoreCase);
+
+        // 传送台一起出生：保持原有强制逻辑。
+        if (_cliForceSpawnAtHost)
+        {
+            if (sceneLocationName != "OnPointerClick") return;
+            if (_cliHostReadyReceived) return;
+        }
+        else if (!fromHost)
+        {
+            return;
+        }
 
         _cliHostReadyReceived = true;
         _cliHostSpawnPosition = pos;
         _cliHostSpawnRotation = rot;
+        _cliPendingPostLoadSnap = true;
+
+        // 主机已经在图里时，直接用主机位置校正本地角色；
+        // 角色还没生成则等 PostLoad 再校正，避免生成在地图外。
+        if (!SceneLoader.IsSceneLoading && LevelManager.LevelInited)
+            Client_TrySnapToHostAnchor(true);
+
         CoopLogSystem.WriteNetworkDiagnostic(
             $"[SCENE] SpawnTogether host ready: target='{sceneTargetId}' host='{sceneId}' main='{mainSceneId}' pos={pos.x:0.0},{pos.y:0.0},{pos.z:0.0}");
-
-        Client_TrySnapToHostAnchor();
     }
 
     internal static bool SceneIdsMatch(string targetSceneId, string hostSceneId)
@@ -550,13 +566,13 @@ public class SceneNet : MonoBehaviour
 
     public void Client_OnLevelInitialized_PostLoad()
     {
-        if (!_cliForceSpawnAtHost)
+        if (!_cliForceSpawnAtHost && !_cliPendingPostLoadSnap)
             return;
 
         if (!_cliHostReadyReceived)
             return;
 
-        if (sceneLocationName != "OnPointerClick")
+        if (_cliForceSpawnAtHost && sceneLocationName != "OnPointerClick")
             return;
 
         if (_cliPendingPostLoadSnap && Client_TrySnapToHostAnchor(true))
@@ -810,8 +826,20 @@ public class SceneNet : MonoBehaviour
         }
 
         // 4) （可选）主机本地也显示客户端：在主机场景创建“该客户端”的远端克隆
-        if (!remoteCharacters.TryGetValue(fromPeer, out var exists) || exists == null)
+        if (remoteCharacters.TryGetValue(fromPeer, out var exists) && exists != null)
+        {
+            // 同一玩家重新进图时旧克隆可能还在上一张图的位置，必须原地校正。
+            var cmc = exists.GetComponent<CharacterMainControl>();
+            if (cmc != null)
+            {
+                cmc.transform.position = pos;
+                if (cmc.modelRoot != null) cmc.modelRoot.rotation = rot;
+            }
+        }
+        else
+        {
             CreateRemoteCharacter.CreateRemoteCharacterAsync(fromPeer, pos, rot, faceJson).Forget();
+        }
     }
 
     public void Host_BeginSceneVote_Simple(string targetSceneId, string curtainGuid,
