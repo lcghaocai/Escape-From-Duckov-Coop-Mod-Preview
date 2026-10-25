@@ -6,6 +6,7 @@ namespace EscapeFromDuckovCoopMod;
 
 public struct LootSlotSnapshot
 {
+    public int Slot;
     public bool HasItem;
     public int TypeId;
     public int Stack;
@@ -13,6 +14,7 @@ public struct LootSlotSnapshot
 
     public void Serialize(NetDataWriter writer)
     {
+        writer.Put(Slot);
         writer.Put(HasItem);
         if (!HasItem) return;
         writer.Put(TypeId);
@@ -22,6 +24,7 @@ public struct LootSlotSnapshot
 
     public void Deserialize(NetPacketReader reader)
     {
+        Slot = reader.GetInt();
         HasItem = reader.GetBool();
         if (!HasItem) return;
         TypeId = reader.GetInt();

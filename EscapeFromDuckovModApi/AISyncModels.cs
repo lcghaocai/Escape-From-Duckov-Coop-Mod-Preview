@@ -74,6 +74,7 @@ public sealed class AISyncEntry
     public double LastKnownRemoteTime { get; set; }
     public float LastStateSentTime { get; set; }
     public float LastStateReceivedTime { get; set; }
+    public float NextWeaponCheckTime { get; set; }
     public bool IsVehicle { get; set; }
     public int VehicleAnimationType { get; set; }
     public float VehicleWalkSpeed { get; set; }
