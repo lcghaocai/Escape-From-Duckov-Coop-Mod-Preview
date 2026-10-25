@@ -51,14 +51,19 @@ internal static class SharedHomeStorage
         _nextBusyTipTime = Time.unscaledTime + 1.5f;
         Debug.LogWarning("[SharedHome] storage request skipped: loadout not ready or session inactive");
     }
-    internal static void BeginSort() => Sorting = true;
+    internal static void BeginSort()
+    {
+        COOPManager.LootNet.Server_FlushWarehouseChanges();
+        Sorting = true;
+    }
     internal static void EndSort()
     {
         Sorting = false;
         if (!IsShared(PlayerStorage.Inventory) || !NetService.Instance.IsServer) return;
-        foreach (var peer in NetService.Instance.netManager.ConnectedPeerList)
-            if (SharedHomeCompatibility.Allows(peer)) COOPManager.LootNet.Server_SendLootboxState(peer, PlayerStorage.Inventory);
-        SharedHome.MarkDirty();
+        COOPManager.LootNet.Server_CompleteWarehouseSort();
+        COOPManager.LootNet.Server_SendLootboxStateToPeers(
+            NetService.Instance.netManager.ConnectedPeerList.Where(SharedHomeCompatibility.Allows), PlayerStorage.Inventory);
+        SharedHome.MarkSaveDirty();
     }
     internal static void Ensure()
     {
@@ -86,8 +91,8 @@ internal static class SharedHomeStorage
         {
             LootManager.Instance._srvLootByUid[LootUid] = PlayerStorage.Inventory;
             // Guests can finish loading first and have their initial request denied.
-            foreach (var peer in NetService.Instance.netManager.ConnectedPeerList)
-                if (SharedHomeCompatibility.Allows(peer)) COOPManager.LootNet.Server_SendLootboxState(peer, PlayerStorage.Inventory);
+            COOPManager.LootNet.Server_SendLootboxStateToPeers(
+                NetService.Instance.netManager.ConnectedPeerList.Where(SharedHomeCompatibility.Allows), PlayerStorage.Inventory);
         }
         else
         {
@@ -104,6 +109,7 @@ internal static class SharedHomeStorage
         Pending.Clear();
         _nextBusyTipTime = 0f;
         SharedHomeStorageOperations.Reset();
+        SharedWarehouseDisplay.Reset();
         if (_recovered) SaveEscrow();
         _recovered = false;
         Unregister();
@@ -370,7 +376,7 @@ internal static class SharedHomeStorage
             }
             if (item && item.StackCount > 0) PlayerStorage.Push(item, buffer);
         }
-        SharedHome.MarkDirty();
+        SharedHome.MarkSaveDirty();
     }
     private static void SaveEscrow()
     {
@@ -383,6 +389,6 @@ internal static class SharedHomeStorage
             items.Add(writer.CopyData());
         }
         SavesSystem.Save(EscrowKey, items);
-        SharedHome.MarkDirty();
+        SharedHome.MarkSaveDirty();
     }
 }

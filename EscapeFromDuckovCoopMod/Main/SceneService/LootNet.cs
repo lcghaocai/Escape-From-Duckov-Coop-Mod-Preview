@@ -50,12 +50,13 @@ namespace EscapeFromDuckovCoopMod;
     private sealed class InventoryRefEq : IEqualityComparer<Inventory>
     {
         public bool Equals(Inventory x, Inventory y) => ReferenceEquals(x, y);
-        public int GetHashCode(Inventory obj) => obj ? obj.GetHashCode() : 0;
+        public int GetHashCode(Inventory obj) => ReferenceEquals(obj, null) ? 0 : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
     }
 
-    private readonly Dictionary<Inventory, int> _cliVersions = new(new InventoryRefEq());
-    private readonly Dictionary<Inventory, int> _cliSnapshotSignatures = new(new InventoryRefEq());
-    private readonly Dictionary<Inventory, int> _srvVersions = new(new InventoryRefEq());
+    private readonly LootVersionState<Inventory> _cliVersions = new(new InventoryRefEq());
+    private readonly LootVersionState<Inventory> _srvVersions = new(new InventoryRefEq());
+    private readonly CoalescedSlotChanges _warehouseChanges = new();
+    private bool _flushingWarehouse;
     private readonly Dictionary<Inventory, HashSet<NetPeer>> _srvViewers = new(new InventoryRefEq());
     private readonly HashSet<Inventory> _srvHookedInventories = new(new InventoryRefEq());
     private readonly HashSet<Item> _srvHookedItems = new();
@@ -98,8 +99,9 @@ namespace EscapeFromDuckovCoopMod;
         _cliPendingPut.Clear();
         _cliPutReceipts.Clear();
         _cliInitializedLoot.Clear();
-        _cliSnapshotSignatures.Clear();
         _cliLootDenyRetry.Clear();
+        _warehouseChanges.Clear();
+        _flushingWarehouse = false;
         _cliSwapByVictim.Clear();
         _cliActiveLoot.Clear();
         _srvPlayerPlaced.Clear();
@@ -268,26 +270,51 @@ namespace EscapeFromDuckovCoopMod;
         }
     }    
 
-    private int NextVersion(Inventory inv)
-    {
-        if (IsServer)
-        {
-            var v = _srvVersions.TryGetValue(inv, out var cur) ? cur : 0;
-            v++;
-            _srvVersions[inv] = v;
-            return v;
-        }
+    private int NextVersion(Inventory inv) => (IsServer ? _srvVersions : _cliVersions).Advance(inv);
+    private int GetCurrentVersion(Inventory inv) => (IsServer ? _srvVersions : _cliVersions).Current(inv);
 
-        var cliV = _cliVersions.TryGetValue(inv, out var curCli) ? curCli : 0;
-        cliV++;
-        _cliVersions[inv] = cliV;
-        return cliV;
+    internal void Tick()
+    {
+        if (IsServer) Server_FlushWarehouseChanges();
+        else if (_cliVersions.HasPendingRequests)
+        {
+            foreach (var inv in _cliVersions.PendingRequests())
+            {
+                if (!inv) _cliVersions.CancelRequest(inv);
+                else Client_RequestLootState(inv, true);
+            }
+        }
     }
 
-    private int GetCurrentVersion(Inventory inv)
+    internal void Server_FlushWarehouseChanges()
     {
-        if (IsServer) return _srvVersions.TryGetValue(inv, out var v) ? v : 0;
-        return _cliVersions.TryGetValue(inv, out var cv) ? cv : 0;
+        var inv = PlayerStorage.Inventory;
+        if (!IsServer || _flushingWarehouse || SharedHomeStorage.Sorting || !_warehouseChanges.Any) return;
+        if (!SharedHomeStorage.IsShared(inv)) { _warehouseChanges.Clear(); return; }
+        _flushingWarehouse = true;
+        var slots = _warehouseChanges.Drain();
+        var sent = 0;
+        try
+        {
+            for (; sent < slots.Length; sent++)
+                if (slots[sent] < inv.Capacity) Server_BroadcastHostSlotChange(inv, slots[sent]);
+        }
+        catch
+        {
+            // Preserve the unsent tail if snapshot construction/transport fails.
+            for (; sent < slots.Length; sent++) _warehouseChanges.Add(slots[sent]);
+            throw;
+        }
+        finally { _flushingWarehouse = false; }
+    }
+
+    internal void Server_CompleteWarehouseSort()
+    {
+        var inv = PlayerStorage.Inventory;
+        if (!IsServer || !SharedHomeStorage.IsShared(inv)) return;
+        _warehouseChanges.Clear();
+        // Sorting changes many slots atomically. All recipients receive this revision.
+        NextVersion(inv);
     }
 
     public void Client_SetLootActive(Inventory inv, bool active)
@@ -325,6 +352,11 @@ namespace EscapeFromDuckovCoopMod;
     {
         if (!IsServer || inv == null) return;
         if (SharedHomeStorage.Sorting && SharedHomeStorage.IsShared(inv)) return;
+        if (SharedHomeStorage.IsShared(inv) && !_flushingWarehouse)
+        {
+            _warehouseChanges.Add(slot);
+            return;
+        }
 
         var lm = LootManagerInstance;
         if (lm == null) return;
@@ -394,6 +426,8 @@ namespace EscapeFromDuckovCoopMod;
         var lm = LootManagerInstance;
         if (lm == null) return;
 
+        if (!_cliVersions.TryRequest(lootInv, Time.unscaledTime)) return;
+
         var rpc = new LootOpenRequestRpc
         {
             Id = lm.BuildLootIdentifier(lootInv),
@@ -430,9 +464,25 @@ namespace EscapeFromDuckovCoopMod;
         var lm = LootManagerInstance;
         if (lm == null) return;
 
-        Server_EnsureInventoryHook(inv);
+        var rpc = Server_BuildLootboxState(inv);
         Server_AddViewer(inv, toPeer);
+        CoopTool.SendRpcTo(toPeer, in rpc);
+    }
 
+    internal void Server_SendLootboxStateToPeers(IEnumerable<NetPeer> peers, Inventory inv)
+    {
+        if (!IsServer || inv == null || LootManagerInstance == null || PersonalFormulaLoot.IsPersonal(inv)) return;
+        var recipients = peers.Where(p => p != null && p.ConnectionState == ConnectionState.Connected).ToArray();
+        if (recipients.Length == 0) return;
+        var rpc = Server_BuildLootboxState(inv);
+        foreach (var peer in recipients) Server_AddViewer(inv, peer);
+        CoopTool.SendRpcToPeers(recipients, in rpc);
+    }
+
+    private LootStateRpc Server_BuildLootboxState(Inventory inv)
+    {
+        if (SharedHomeStorage.IsShared(inv)) Server_FlushWarehouseChanges();
+        Server_EnsureInventoryHook(inv);
         var slots = new LootSlotSnapshot[inv.Capacity];
         for (var i = 0; i < inv.Capacity; i++)
         {
@@ -448,16 +498,14 @@ namespace EscapeFromDuckovCoopMod;
                 };
         }
 
-        var rpc = new LootStateRpc
+        return new LootStateRpc
         {
-            Id = lm.BuildLootIdentifier(inv),
+            Id = LootManagerInstance.BuildLootIdentifier(inv),
             IsSnapshot = true,
-            Version = NextVersion(inv),
+            Version = GetCurrentVersion(inv),
             Capacity = inv.Capacity,
             Snapshot = slots
         };
-
-        CoopTool.SendRpcTo(toPeer, in rpc);
     }
 
     private void Server_AddViewer(Inventory inv, NetPeer peer)
@@ -707,29 +755,11 @@ namespace EscapeFromDuckovCoopMod;
         {
             if (!inv) continue;
             _cliInitializedLoot.Add(inv);
+            // A denial completes this attempt. Clear its timer so the first retry
+            // can run immediately and a second denial cannot retry forever in Tick.
+            _cliVersions.CancelRequest(inv);
             if (!_cliLootDenyRetry.Add(inv)) continue;
             Client_RequestLootState(inv, true);
-        }
-    }
-
-    private static int ComputeLootSnapshotSignature(LootStateRpc rpc)
-    {
-        unchecked
-        {
-            var hash = 17;
-            hash = hash * 31 + rpc.Capacity;
-            var count = rpc.Snapshot?.Length ?? 0;
-            hash = hash * 31 + count;
-            for (var i = 0; i < count; i++)
-            {
-                var slot = rpc.Snapshot[i];
-                hash = hash * 31 + (slot.HasItem ? 1 : 0);
-                hash = hash * 31 + slot.TypeId;
-                hash = hash * 31 + slot.Stack;
-                if (slot.HasItem)
-                    hash = hash * 31 + ItemTool.ComputeSnapshotHash(slot.Item);
-            }
-            return hash;
         }
     }
 
@@ -742,30 +772,24 @@ namespace EscapeFromDuckovCoopMod;
         var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
         if (!inv || LootboxDetectUtil.IsPrivateInventory(inv)) return;
 
-        // 单点“更新”/整理后经常会收到内容完全相同的全量快照。
-        // 旧逻辑会把每个槽位重新 Remove/Add 一遍，触发多次 UI 重绘；
-        // 这里先比内容签名，没变化就直接跳过。
         if (rpc.IsSnapshot)
         {
-            var signature = ComputeLootSnapshotSignature(rpc);
-            var mustInitialize = !_cliInitializedLoot.Contains(inv);
-            if (!mustInitialize && _cliSnapshotSignatures.TryGetValue(inv, out var previousSignature) &&
-                previousSignature == signature)
+            if (_cliVersions.IsStaleSnapshot(inv, rpc.Version)) return;
+        }
+        else
+        {
+            var disposition = _cliVersions.ClassifyDelta(inv, rpc.Version);
+            if (disposition == LootDeltaDisposition.Ignore) return;
+            if (disposition == LootDeltaDisposition.RequestSnapshot)
+            {
+                Client_RequestLootState(inv, true);
                 return;
-            _cliSnapshotSignatures[inv] = signature;
+            }
         }
 
         Client_ForceSearchMode(inv);
-
-        var curVersion = GetCurrentVersion(inv);
-        if (!rpc.IsSnapshot && rpc.Version != curVersion + 1)
-        {
-            Client_RequestLootState(inv, true);
-            return;
-        }
-
-        _cliVersions[inv] = Mathf.Max(rpc.Version, curVersion);
-
+        var applied = true;
+        var changed = false;
         _applyingLootState = true;
         Delegate suspendedContentChanged = null;
         FieldInfo contentChangedField = null;
@@ -776,7 +800,10 @@ namespace EscapeFromDuckovCoopMod;
             if (rpc.IsSnapshot)
             {
                 if (rpc.Capacity > 0 && inv.Capacity != rpc.Capacity)
+                {
+                    changed = true;
                     inv.SetCapacity(rpc.Capacity);
+                }
 
                 for (var i = 0; i < rpc.Capacity && i < rpc.Snapshot.Length; i++)
                 {
@@ -787,7 +814,11 @@ namespace EscapeFromDuckovCoopMod;
                         if (existing != null && IsQuestTagged(existing))
                             continue;
 
-                        inv.RemoveAt(i, out _);
+                        if (existing != null)
+                        {
+                            changed = true;
+                            inv.RemoveAt(i, out _);
+                        }
                         continue;
                     }
 
@@ -802,6 +833,12 @@ namespace EscapeFromDuckovCoopMod;
                         continue;
 
                     var inspectedLocally = exist && exist.Inspected;
+                    if (exist != null && ItemTool.SnapshotMatches(exist, targetSnap))
+                    {
+                        ResetInspectionFlags(inv, exist, inspectedLocally: inspectedLocally);
+                        continue;
+                    }
+                    changed = true;
                     if (exist != null && exist.TypeID == targetSnap.TypeId && ItemTool.ApplySnapshot(exist, targetSnap))
                     {
                         ResetInspectionFlags(inv, exist, inspectedLocally: inspectedLocally);
@@ -815,11 +852,13 @@ namespace EscapeFromDuckovCoopMod;
                             if (item)
                             {
                                 ResetInspectionFlags(inv, item, inspectedLocally: false);
-                                inv.AddAt(item, i);
+                                if (!inv.AddAt(item, i)) { applied = false; item.DestroyTree(); }
                             }
+                            else applied = false;
                         }
                         catch (Exception ex)
                         {
+                            applied = false;
                             Debug.LogWarning($"[LOOT] instantiate snapshot item failed: {ex.Message}");
                         }
                     }
@@ -830,6 +869,7 @@ namespace EscapeFromDuckovCoopMod;
                 if (Client_LootDeltaAlreadyApplied(inv, rpc))
                     return;
 
+                changed = true;
                 var delta = rpc.Delta;
                 if (!delta.HasItem)
                 {
@@ -865,24 +905,41 @@ namespace EscapeFromDuckovCoopMod;
                             if (item)
                             {
                                 ResetInspectionFlags(inv, item, inspectedLocally: false);
-                                inv.AddAt(item, rpc.Slot);
+                                if (!inv.AddAt(item, rpc.Slot)) { applied = false; item.DestroyTree(); }
                             }
+                            else applied = false;
                         }
                         catch (Exception ex)
                         {
+                            applied = false;
                             Debug.LogWarning($"[LOOT] instantiate delta item failed: {ex.Message}");
                         }
                     }
                 }
             }
         }
+        catch
+        {
+            applied = false;
+            throw;
+        }
         finally
         {
-            _cliPutReceipts.Apply(inv, rpc.IsSnapshot ? null : rpc.Slot);
-            if (rpc.IsSnapshot)
+            if (applied)
             {
-                _cliInitializedLoot.Add(inv);
-                _cliLootDenyRetry.Remove(inv);
+                _cliVersions.Applied(inv, rpc.Version);
+                if (rpc.IsSnapshot)
+                {
+                    _cliInitializedLoot.Add(inv);
+                    _cliLootDenyRetry.Remove(inv);
+                    _cliVersions.SnapshotReceived(inv);
+                }
+            }
+            try { _cliPutReceipts.Apply(inv, rpc.IsSnapshot ? null : rpc.Slot); }
+            catch (Exception ex)
+            {
+                applied = false;
+                Debug.LogWarning($"[LOOT] apply put receipt failed: {ex.Message}");
             }
             if (suspendedContentChanged != null && contentChangedField != null)
             {
@@ -891,11 +948,14 @@ namespace EscapeFromDuckovCoopMod;
                     contentChangedField.SetValue(inv, suspendedContentChanged);
                     // 700 个槽位逐个 Remove/Add 时 UI 会刷新 700 次；
                     // 批量应用期间摘掉监听，最后只通知一次，让 UI 重建一次。
-                    try { suspendedContentChanged.DynamicInvoke(inv, -1); }
-                    catch
+                    if (changed)
                     {
-                        try { suspendedContentChanged.DynamicInvoke(inv, 0); }
-                        catch { }
+                        try { suspendedContentChanged.DynamicInvoke(inv, -1); }
+                        catch
+                        {
+                            try { suspendedContentChanged.DynamicInvoke(inv, 0); }
+                            catch { }
+                        }
                     }
                 }
                 catch (Exception e)
@@ -904,6 +964,7 @@ namespace EscapeFromDuckovCoopMod;
                 }
             }
             _applyingLootState = false;
+            if (!applied) Client_RequestLootState(inv, true);
         }
     }
 
@@ -1141,6 +1202,11 @@ namespace EscapeFromDuckovCoopMod;
         var lm = LootManagerInstance;
         if (!IsServer || inv == null || lm == null) return;
         if (PersonalFormulaLoot.IsPersonal(inv)) return;
+        if (SharedHomeStorage.IsShared(inv) && !_flushingWarehouse)
+        {
+            if (!SharedHomeStorage.Sorting) _warehouseChanges.Add(slot);
+            return;
+        }
         CorpseRecovery.QueueSnapshot(inv);
 
         Item item = null;
@@ -1155,25 +1221,25 @@ namespace EscapeFromDuckovCoopMod;
         if (item != null && IsQuestTagged(item))
             return;
 
+        var delta = new LootSlotSnapshot
+        {
+            HasItem = !cleared,
+            TypeId = typeId,
+            Stack = count,
+            Item = item ? ItemTool.MakeSnapshot(item) : default
+        };
         var rpc = new LootStateRpc
         {
             Id = lm.BuildLootIdentifier(inv),
             IsSnapshot = false,
             Version = NextVersion(inv),
             Slot = slot,
-            Delta = new LootSlotSnapshot
-            {
-                HasItem = !cleared,
-                TypeId = typeId,
-                Stack = count,
-                Item = item ? ItemTool.MakeSnapshot(item) : default
-            }
+            Delta = delta
         };
 
         if (_srvViewers.TryGetValue(inv, out var viewers) && viewers.Count > 0)
         {
-            foreach (var viewer in viewers)
-                CoopTool.SendRpcTo(viewer, in rpc);
+            CoopTool.SendRpcToPeers(viewers, in rpc);
         }
         else
         {
@@ -1255,7 +1321,6 @@ namespace EscapeFromDuckovCoopMod;
         var lm = LootManagerInstance;
         if (IsServer || lm == null) return;
         var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
-        if (inv && _cliVersions.TryGetValue(inv, out var v)) _cliVersions[inv] = v; // keep version aligned
         _cliPendingPut.TryGetValue(rpc.Token, out var placed);
         _cliPendingPut.Remove(rpc.Token);
 
@@ -1286,7 +1351,6 @@ namespace EscapeFromDuckovCoopMod;
         var lm = LootManagerInstance;
         if (IsServer || lm == null) return;
         var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
-        if (inv && _cliVersions.TryGetValue(inv, out var v)) _cliVersions[inv] = v;
 
         if (inv)
         {

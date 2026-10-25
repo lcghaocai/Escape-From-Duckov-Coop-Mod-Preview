@@ -132,13 +132,22 @@ public class ModBehaviourF : MonoBehaviour
         gameObject.AddComponent<KazooSyncDriver>();
     }
 
+    private void LateUpdate()
+    {
+        if (networkStarted) SharedWarehouseDisplay.Tick();
+    }
+
     private void Update()
     {
         // Transport callbacks and scene-gate replies must keep running while the
         // previous level is gone and the new LevelManager is not initialized yet.
         if (networkStarted) netManager?.PollEvents();
         TeleporterTravel.Tick();
-        if (networkStarted) SharedHome.Tick();
+        if (networkStarted)
+        {
+            SharedHome.Tick();
+            COOPManager.LootNet?.Tick();
+        }
         if (LevelManager.Instance == null)
         {
             return;
