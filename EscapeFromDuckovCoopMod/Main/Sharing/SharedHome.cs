@@ -261,6 +261,11 @@ public static class SharedHome
             SharedHomeStorage.ReceiveTake(message.Data);
             return;
         }
+        if (Guest && message.Kind == 12 && message.Session == _session)
+        {
+            SharedHomeQuests.ReceiveTaskDelta(message.Data);
+            return;
+        }
         if (!Guest || message.Kind != 1 || message.Session != _session || message.Revision <= _revision) return;
         _revision = message.Revision;
         _pendingState = SharedHomeSave.Combine(_pendingState, message.Data);
