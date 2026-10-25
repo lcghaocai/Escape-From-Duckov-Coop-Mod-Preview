@@ -212,8 +212,6 @@ public class ModBehaviourF : MonoBehaviour
                 }
             }
 
-            Service?.UpdateAdaptiveSyncInterval();
-
             syncTimer += Time.deltaTime;
             if (syncTimer >= syncInterval)
             {

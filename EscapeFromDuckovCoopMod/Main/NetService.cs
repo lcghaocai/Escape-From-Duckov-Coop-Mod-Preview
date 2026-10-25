@@ -46,16 +46,8 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
     public float broadcastTimer;
     public float broadcastInterval = 5f;
     public float syncTimer;
-    public float syncInterval = 0.05f; // 位置/载具等连续状态最多 20Hz（0.05s）；网络 RTT 通常 >=50ms，再高没有收益。
-    public float configuredSyncInterval = 0.05f; // 用户设置的下限间隔；自适应只会把它调慢，不会更快
-    private readonly List<int> _latencySamples = new();
-    private float _nextAdaptiveSyncUpdateTime;
-    private int _medianLatencyMs;
-    private float _pendingAdaptiveInterval;
-    private int _pendingAdaptiveCount;
-    private const int LatencySampleWindow = 10;
-    private const float AdaptiveMaxSyncInterval = 0.1f;
-    public int MedianLatencyMs => _medianLatencyMs;
+    public float syncInterval = 0.05f; // 固定网络 tick，默认 20Hz；可手动改到 0.0167（60Hz）或 0.1（10Hz）。
+    public float configuredSyncInterval = 0.05f; // 用户设置的固定间隔
 
     public readonly HashSet<int> _dedupeShotFrame = new(); // 本帧已发过的标记
 
@@ -360,72 +352,12 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
             else
                 status.Jitter = 0;
         }
-
-        if (latency <= 0) return;
-        _latencySamples.Add(latency);
-        if (_latencySamples.Count > LatencySampleWindow)
-            _latencySamples.RemoveAt(0);
     }
 
     public void SetConfiguredSyncInterval(float value)
     {
         configuredSyncInterval = Mathf.Clamp(value, 0.0167f, 0.1f);
-        ApplyEffectiveSyncInterval(configuredSyncInterval);
-    }
-
-    public void UpdateAdaptiveSyncInterval()
-    {
-        if (!networkStarted) return;
-        var now = Time.unscaledTime;
-        if (now < _nextAdaptiveSyncUpdateTime) return;
-        _nextAdaptiveSyncUpdateTime = now + 1f;
-
-        var peers = netManager?.ConnectedPeerList;
-        if (peers == null || peers.Count == 0)
-        {
-            _latencySamples.Clear();
-            _medianLatencyMs = 0;
-            ApplyEffectiveSyncInterval(configuredSyncInterval);
-            return;
-        }
-
-        if (_latencySamples.Count == 0)
-        {
-            ApplyEffectiveSyncInterval(configuredSyncInterval);
-            return;
-        }
-
-        var sorted = _latencySamples.ToArray();
-        Array.Sort(sorted);
-        _medianLatencyMs = sorted[sorted.Length / 2];
-
-        // 位置/载具的发送间隔至少等于 RTT 中位数；RTT 越大，发包越慢。
-        // 上限 0.1s（10Hz），下限是用户设置的 SyncInterval（默认 0.05s / 20Hz）。
-        var target = Mathf.Clamp(_medianLatencyMs / 1000f, configuredSyncInterval, AdaptiveMaxSyncInterval);
-
-        // 滞回：小变化不调，同一目标连续两次（约 2 秒）才真正切换，避免来回抖。
-        if (Mathf.Abs(target - syncInterval) < 0.012f)
-        {
-            _pendingAdaptiveCount = 0;
-            return;
-        }
-        if (Mathf.Abs(target - _pendingAdaptiveInterval) > 0.004f)
-        {
-            _pendingAdaptiveInterval = target;
-            _pendingAdaptiveCount = 0;
-            return;
-        }
-        _pendingAdaptiveCount++;
-        if (_pendingAdaptiveCount < 2) return;
-        _pendingAdaptiveCount = 0;
-        ApplyEffectiveSyncInterval(target);
-    }
-
-    private void ApplyEffectiveSyncInterval(float value)
-    {
-        value = Mathf.Clamp(value, configuredSyncInterval, AdaptiveMaxSyncInterval);
-        if (Mathf.Approximately(syncInterval, value)) return;
-        syncInterval = value;
+        syncInterval = configuredSyncInterval;
     }
 
     public void OnConnectionRequest(ConnectionRequest request)
