@@ -88,7 +88,15 @@ internal static class SharedHomeStorageOperations
         finally
         {
             // Release the guest's operation lock and refresh even when its view was stale.
-            if (inventory) COOPManager.LootNet.Server_SendLootboxState(peer, inventory);
+            // A throw here must not swallow the reply, otherwise the guest's token stays pending forever.
+            try
+            {
+                if (inventory) COOPManager.LootNet.Server_SendLootboxState(peer, inventory);
+            }
+            catch (Exception e)
+            {
+                CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] storageEdit refresh failed: {e}");
+            }
             var reply = new NetDataWriter();
             reply.Put(token);
             reply.Put(false);

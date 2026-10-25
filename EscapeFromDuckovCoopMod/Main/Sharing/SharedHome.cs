@@ -163,11 +163,29 @@ public static class SharedHome
     }
     internal static void Request(string action, object arguments)
     {
-        if (!Guest || Applying || string.IsNullOrEmpty(_session)) return;
-        if (action != "storageTaken" && (!SharedHomeLoadouts.Ready || SharedHomeCharacterCreation.Joining)) return;
+        RequestChecked(action, arguments);
+    }
+
+    // 共享仓库的请求必须先确认“现在真的能发出去”，否则调用方会留下永远等不到回包的 token。
+    internal static bool CanSend => Guest && !Applying && !string.IsNullOrEmpty(_session);
+    internal static bool CanRequest => CanSend && SharedHomeLoadouts.Ready && !SharedHomeCharacterCreation.Joining;
+
+    internal static bool RequestChecked(string action, object arguments)
+    {
+        if (action == "storageTaken")
+        {
+            // Escrow 释放包不受 Ready 影响，否则客机切图/重载装备期间会一直占着主机暂存物。
+            if (!CanSend) return false;
+        }
+        else if (!CanRequest)
+        {
+            return false;
+        }
+
         var data = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new { action, arguments }));
         var message = new SharedHomeRpc { Kind = 2, Session = _session, Revision = ++_requestSerial, Data = data };
         CoopTool.SendRpc(in message);
+        return true;
     }
     internal static void SendPrivate(byte kind, byte[] data, NetPeer peer = null)
     {
@@ -196,7 +214,15 @@ public static class SharedHome
             if (Requests.TryGetValue(context.Sender, out var last) && message.Revision <= last) return;
             Requests[context.Sender] = message.Revision;
             var request = JObject.Parse(Encoding.UTF8.GetString(message.Data));
-            SharedHomeActions.Execute((string)request["action"], (JObject)request["arguments"], context.Sender);
+            try
+            {
+                SharedHomeActions.Execute((string)request["action"], (JObject)request["arguments"], context.Sender);
+            }
+            catch (Exception e)
+            {
+                // 单个共享操作异常不能打断后续请求处理；仓库操作自身会在 finally 里回包。
+                CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] action failed: {e}");
+            }
             MarkDirty();
             return;
         }
