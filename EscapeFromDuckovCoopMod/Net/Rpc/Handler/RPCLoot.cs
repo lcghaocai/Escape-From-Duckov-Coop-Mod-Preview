@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using static EscapeFromDuckovCoopMod.LootNet;
@@ -73,6 +73,7 @@ public static class RPCLoot
     {
         if (context.IsServer) return;
         Debug.LogWarning($"[LOOT] request denied: {message.Reason}");
+        COOPManager.LootNet?.Client_HandleLootDeny(message.Reason);
     }
 
     public static void HandleDeadLootSpawn(RpcContext context, DeadLootSpawnRpc message)

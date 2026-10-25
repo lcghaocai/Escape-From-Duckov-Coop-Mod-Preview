@@ -37,6 +37,7 @@ namespace EscapeFromDuckovCoopMod;
     public uint _nextLootToken = 1;
     public bool _serverApplyingLoot;
     private readonly HashSet<Inventory> _cliActiveLoot = new(new InventoryRefEq());
+    private readonly HashSet<Inventory> _cliLootDenyRetry = new(new InventoryRefEq());
     private readonly HashSet<Item> _srvPlayerPlaced = new();
     private readonly Dictionary<int, bool> _cliLootVisibility = new();
     private readonly Dictionary<Item, string> _cliSlotOrigins = new();
@@ -98,6 +99,7 @@ namespace EscapeFromDuckovCoopMod;
         _cliPutReceipts.Clear();
         _cliInitializedLoot.Clear();
         _cliSnapshotSignatures.Clear();
+        _cliLootDenyRetry.Clear();
         _cliSwapByVictim.Clear();
         _cliActiveLoot.Clear();
         _srvPlayerPlaced.Clear();
@@ -693,6 +695,23 @@ namespace EscapeFromDuckovCoopMod;
         }
     }
 
+    public void Client_HandleLootDeny(string reason)
+    {
+        if (IsServer) return;
+        if (reason != "no_inv" && reason != "bad_snapshot") return;
+
+        // 主机偶尔会因为场景/UID 缓存问题拒绝开箱；旧逻辑会让
+        // Client_WaitingForLootState 永远为 true，容器就再也搜不了。
+        // 这里先解除搜索阻塞，并对当前打开的容器重试一次。
+        foreach (var inv in _cliActiveLoot.ToArray())
+        {
+            if (!inv) continue;
+            _cliInitializedLoot.Add(inv);
+            if (!_cliLootDenyRetry.Add(inv)) continue;
+            Client_RequestLootState(inv, true);
+        }
+    }
+
     private static int ComputeLootSnapshotSignature(LootStateRpc rpc)
     {
         unchecked
@@ -860,7 +879,11 @@ namespace EscapeFromDuckovCoopMod;
         finally
         {
             _cliPutReceipts.Apply(inv, rpc.IsSnapshot ? null : rpc.Slot);
-            if (rpc.IsSnapshot) _cliInitializedLoot.Add(inv);
+            if (rpc.IsSnapshot)
+            {
+                _cliInitializedLoot.Add(inv);
+                _cliLootDenyRetry.Remove(inv);
+            }
             if (suspendedContentChanged != null && contentChangedField != null)
             {
                 try
