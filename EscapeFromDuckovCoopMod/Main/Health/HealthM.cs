@@ -39,6 +39,8 @@ public class HealthM : MonoBehaviour
     public static HealthM Instance;
 
     private readonly Dictionary<string, (float max, float cur)> _srvPlayerSnapshots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HealthSyncClock _healthClock = new();
+    private readonly Dictionary<NetPeer, double> _srvPlayerReportTimestamp = new();
     private readonly Dictionary<string, double> _srvPlayerHealthTimestamp = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, double> _cliPlayerHealthTimestamp = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, float> _srvNextBroadcast = new(StringComparer.OrdinalIgnoreCase);
@@ -121,10 +123,13 @@ public class HealthM : MonoBehaviour
             LifeId = _localDeathReport.LifeId,
             IsDead = health.IsDead,
             Buffs = Buff_.CaptureLocal(),
-            Timestamp = Time.unscaledTimeAsDouble
+            Timestamp = _healthClock.Next(Time.unscaledTimeAsDouble)
         };
 
-        CoopTool.SendRpc(in rpc);
+        // The death inventory is sent on the ordered channel immediately afterwards.
+        // Its permit must arrive first even if ordinary health reports are unordered.
+        if (rpc.IsDead) CoopTool.SendOrderedRpc(in rpc);
+        else CoopTool.SendRpc(in rpc);
 
         _cliLastSentHp = (max, cur);
         _cliNextSendHp = now + CLIENT_SEND_INTERVAL;
@@ -195,7 +200,7 @@ public class HealthM : MonoBehaviour
         var (max, cur) = ReadHealth(health);
         if (max <= 0f) return;
 
-        var timestamp = Time.unscaledTimeAsDouble;
+        var timestamp = _healthClock.Next(Time.unscaledTimeAsDouble);
         _srvPlayerHealthTimestamp[playerId] = timestamp;
         BroadcastPlayerSnapshot(playerId, max, cur, damage.HasValue ? DamageForwardPayload.FromDamageInfo(damage) : (DamageForwardPayload?)null, null, timestamp, Buff_.CaptureLocal());
     }
@@ -214,7 +219,7 @@ public class HealthM : MonoBehaviour
 
         _srvPlayerSnapshots[playerId] = (max, cur);
         _srvNextBroadcast[playerId] = Time.time + SERVER_SEND_INTERVAL;
-        if (timestamp <= 0d) timestamp = Time.unscaledTimeAsDouble;
+        if (timestamp <= 0d) timestamp = _healthClock.Next(Time.unscaledTimeAsDouble);
 
         var rpc = new PlayerHealthBroadcastRpc
         {
@@ -234,17 +239,22 @@ public class HealthM : MonoBehaviour
     {
         if (!IsServer || sender == null) return;
 
-        _deathReports.Observe(sender, message.LifeId, message.IsDead && message.CurrentHealth <= 0f);
-
         var service = Service;
         var playerId = service?.GetPlayerId(sender);
         if (string.IsNullOrEmpty(playerId)) return;
 
         var max = Mathf.Max(1f, message.MaxHealth);
         var cur = Mathf.Clamp(message.CurrentHealth, 0f, max);
-        var timestamp = message.Timestamp > 0d ? message.Timestamp : Time.unscaledTimeAsDouble;
-        if (_srvPlayerHealthTimestamp.TryGetValue(playerId, out var lastTimestamp) && timestamp <= lastTimestamp)
-            return;
+        // Source time is scoped to the connection; a restarted client has a new clock.
+        if (message.Timestamp > 0d)
+        {
+            if (_srvPlayerReportTimestamp.TryGetValue(sender, out var lastTimestamp) && message.Timestamp <= lastTimestamp)
+                return;
+            _srvPlayerReportTimestamp[sender] = message.Timestamp;
+        }
+        _deathReports.Observe(sender, message.LifeId, message.IsDead && message.CurrentHealth <= 0f);
+        // Relays always use the host clock so other clients can order across reconnects.
+        var timestamp = _healthClock.Next(Time.unscaledTimeAsDouble);
         _srvPlayerHealthTimestamp[playerId] = timestamp;
 
 
@@ -267,7 +277,21 @@ public class HealthM : MonoBehaviour
     public bool Server_ConsumeDeathLoot(CoopPeer peer, string lifeId) => Server_CanSpawnDeathLoot(peer, lifeId) &&
         _deathReports.TryConsume(peer, lifeId);
 
-    public void ForgetDeathReports(CoopPeer peer) => _deathReports.Remove(peer);
+    public void ForgetDeathReports(CoopPeer peer)
+    {
+        if (!IsServer)
+        {
+            ResetDeathReports();
+            return;
+        }
+        _deathReports.Remove(peer);
+        _srvPlayerReportTimestamp.Remove(peer);
+        var playerId = Service?.GetPlayerId(peer);
+        if (string.IsNullOrEmpty(playerId)) return;
+        _srvPlayerHealthTimestamp.Remove(playerId);
+        _srvPlayerSnapshots.Remove(playerId);
+        _srvNextBroadcast.Remove(playerId);
+    }
 
     public void ResetDeathReports()
     {
@@ -275,6 +299,7 @@ public class HealthM : MonoBehaviour
         _localDeathReport.Reset();
         _deathReports.Clear();
         _srvPlayerSnapshots.Clear();
+        _srvPlayerReportTimestamp.Clear();
         _srvPlayerHealthTimestamp.Clear();
         _cliPlayerHealthTimestamp.Clear();
         _srvNextBroadcast.Clear();

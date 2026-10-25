@@ -3,14 +3,21 @@ namespace EscapeFromDuckovCoopMod;
 internal sealed class HealthSnapshotOrder
 {
     private long _received;
-    private readonly Dictionary<int, long> _applied = new();
+    private readonly Dictionary<int, (long Order, double Timestamp)> _applied = new();
 
     public long Receive() => ++_received;
 
-    public bool TryApply(int id, long order)
+    // Receipt order is sufficient only for legacy messages sharing an ordered channel.
+    // Snapshots and unordered health updates must compare the host's capture timestamps.
+    internal static bool IsNewer(long order, double timestamp, long previousOrder, double previousTimestamp) =>
+        order > 0 && !double.IsNaN(timestamp) && !double.IsInfinity(timestamp) &&
+        (timestamp > 0d ? timestamp > previousTimestamp : previousTimestamp <= 0d && order > previousOrder);
+
+    public bool TryApply(int id, long order, double timestamp = 0d)
     {
-        if (order <= 0 || (_applied.TryGetValue(id, out var previous) && order <= previous)) return false;
-        _applied[id] = order;
+        _applied.TryGetValue(id, out var previous);
+        if (!IsNewer(order, timestamp, previous.Order, previous.Timestamp)) return false;
+        _applied[id] = (order, timestamp);
         return true;
     }
 

@@ -1,3 +1,4 @@
+global using NetPacketReader = EscapeFromDuckovCoopMod.CoopPacketReader;
 global using LiteNetLib;
 global using LiteNetLib.Utils;
 global using UnityEngine;

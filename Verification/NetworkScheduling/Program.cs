@@ -12,6 +12,11 @@ static class Program
 
     public static void Main()
     {
+        Test("health snapshots and unordered broadcasts use capture order", HealthCaptureOrder);
+        Test("same-frame health changes retain the final state", SameFrameHealth);
+        Test("AI metadata delay retains hits and kill credit while coalescing health", PendingHealth);
+        Test("death permit survives delayed living reports", DeathOrdering);
+        Test("AI snapshot wire tails preserve multi-entry and legacy boundaries", SnapshotWireFormat);
         Test("replaced state moves behind intervening reliable events", StateOrdering);
         Test("timestamped UDP state rejects late older samples", OutOfOrderState);
         Test("seven-player state burst retains every transaction and releases every buffer once", StateFlood);
@@ -23,6 +28,114 @@ static class Program
         Test("real LiteNetLib loopback: seven clients, time budget, retained readers and exceptions", Loopback);
         Test("unreachable-host errors are aggregated", NetworkErrors);
         Console.WriteLine($"All {_passed} network scheduling checks passed.");
+    }
+
+    private static void HealthCaptureOrder()
+    {
+        var order = new HealthSnapshotOrder();
+        // A pre-hit snapshot arrives after the newer unordered damage broadcast.
+        Check(order.TryApply(1, order.Receive(), 20), "Initial health not accepted");
+        Check(!order.TryApply(1, order.Receive(), 10), "Old snapshot overwrote newer health");
+        // A newer broadcast received before model creation is applied after a snapshot.
+        var pending = order.Receive();
+        Check(order.TryApply(2, order.Receive(), 10), "Spawn snapshot not accepted");
+        Check(order.TryApply(2, pending, 20), "Metadata delay discarded newer health");
+        Check(!order.TryApply(2, order.Receive(), 20), "Duplicate capture accepted");
+        Check(!order.TryApply(2, order.Receive()), "Unstamped confirmation reverted stamped health");
+        Check(order.TryApply(3, 2) && !order.TryApply(3, 1), "Legacy ordered fallback broken");
+        order.Clear();
+        Check(order.TryApply(1, order.Receive(), 1), "Scene reset retained previous ordering");
+    }
+
+    private static void SameFrameHealth()
+    {
+        var clock = new HealthSyncClock();
+        var stamps = Enumerable.Range(0, 100).Select(_ => clock.Next(50)).ToArray();
+        Check(stamps.Zip(stamps.Skip(1), (a, b) => b > a).All(b => b), "Same-frame captures tied");
+        var order = new HealthSnapshotOrder();
+        var hp = 100;
+        foreach (var i in Enumerable.Range(0, 100).Reverse())
+            if (order.TryApply(1, order.Receive(), stamps[i])) hp = 99 - i;
+        Check(hp == 0, "Out-of-order same-frame damage lost the lethal state");
+        Check(clock.Next(1) > stamps[^1], "Clock restart regressed the relay timestamp");
+    }
+
+    private static void PendingHealth()
+    {
+        var pending = new PendingHealthUpdates<string>();
+        pending.Add("newest state", 1, 30, false);
+        pending.Add("hit one", 2, 10, true);
+        pending.Add("kill credit", 3, 20, true);
+        pending.Add("old broadcast", 4, 15, false);
+        Check(pending.Message == "newest state" && pending.Order == 1, "Late older packet replaced pending state");
+        Check(pending.Events.SequenceEqual(new[] { "hit one", "kill credit" }), "One-shot health events coalesced away");
+    }
+
+    private static void DeathOrdering()
+    {
+        var peer = new object();
+        var gate = new PlayerDeathReportGate<object>();
+        var order = new HealthSnapshotOrder();
+        var life = Guid.NewGuid().ToString("N");
+        void Receive(bool dead, double stamp)
+        {
+            if (order.TryApply(1, order.Receive(), stamp)) gate.Observe(peer, life, dead);
+        }
+        Receive(true, 20);
+        Receive(false, 10);
+        Check(gate.TryConsume(peer, life), "Delayed living report revoked death permit");
+        Check(!gate.TryConsume(peer, life), "Death inventory consumed twice");
+    }
+
+    private static void SnapshotWireFormat()
+    {
+        var entries = new[]
+        {
+            new AISnapshotEntry { Id = 7, CurrentHealth = 91, HealthTimestamp = 10.5,
+                BuffIds = new[] { 4, 5 }, BuffWeaponTypeIds = new[] { 8, 9 }, BuffLayers = new[] { 2, 3 } },
+            new AISnapshotEntry { Id = 8, CurrentHealth = 37, HealthTimestamp = 10.6, BuffLayers = Array.Empty<int>() }
+        };
+        CoopPacketReader Reader(byte[] bytes) => new(bytes, 0, bytes.Length);
+        foreach (var count in new[] { 0, 1, 2 })
+        foreach (var useList in new[] { false, true })
+        {
+            var subset = entries.Take(count).ToArray();
+            var chunk = new AISnapshotChunkRpc { Reset = true,
+                Entries = useList ? null : subset, EntryList = useList ? subset : null, EntryCount = count };
+            var writer = new NetDataWriter();
+            chunk.Serialize(writer);
+            var bytes = writer.CopyData();
+            var reader = Reader(bytes);
+            var parsed = new AISnapshotChunkRpc();
+            parsed.Deserialize(reader);
+            Check(reader.AvailableBytes == 0 && parsed.Entries.Length == count, "Chunk boundaries shifted");
+            for (var i = 0; i < count; i++)
+                Check(parsed.Entries[i].Id == subset[i].Id && parsed.Entries[i].CurrentHealth == subset[i].CurrentHealth &&
+                    parsed.Entries[i].HealthTimestamp == subset[i].HealthTimestamp &&
+                    parsed.Entries[i].BuffLayers.SequenceEqual(subset[i].BuffLayers), "Health tail corrupted entry/buff data");
+
+            // Older hosts have buff layers but no health tail.
+            var legacy = Reader(bytes.Take(bytes.Length - count * sizeof(double)).ToArray());
+            parsed.Deserialize(legacy);
+            Check(legacy.AvailableBytes == 0 && parsed.Entries.All(e => e.HealthTimestamp == 0), "Legacy chunk not readable");
+            // An older reader still consumes exactly the old prefix on a new message.
+            var prefix = Reader(bytes);
+            prefix.GetBool(); prefix.GetUShort();
+            var oldEntries = new AISnapshotEntry[count];
+            for (var i = 0; i < count; i++) oldEntries[i].Deserialize(prefix);
+            for (var i = 0; i < count; i++) oldEntries[i].ReadBuffLayers(prefix);
+            Check(prefix.AvailableBytes == count * sizeof(double), "New fields inserted into legacy entry layout");
+        }
+        var spawn = new AISpawnRpc { Entry = entries[0] };
+        var spawnWriter = new NetDataWriter();
+        spawn.Serialize(spawnWriter);
+        var spawnBytes = spawnWriter.CopyData();
+        var spawnReader = Reader(spawnBytes);
+        var parsedSpawn = new AISpawnRpc();
+        parsedSpawn.Deserialize(spawnReader);
+        Check(spawnReader.AvailableBytes == 0 && parsedSpawn.Entry.HealthTimestamp == 10.5, "Spawn tail missing");
+        parsedSpawn.Deserialize(Reader(spawnBytes.Take(spawnBytes.Length - sizeof(double)).ToArray()));
+        Check(parsedSpawn.Entry.HealthTimestamp == 0 && parsedSpawn.Entry.BuffLayers.Length == 2, "Legacy spawn retained old timestamp");
     }
 
     private static void StateOrdering()

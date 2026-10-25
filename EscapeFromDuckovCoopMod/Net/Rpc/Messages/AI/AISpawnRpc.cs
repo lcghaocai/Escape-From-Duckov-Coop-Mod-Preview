@@ -12,11 +12,13 @@ public struct AISpawnRpc : IRpcMessage
     {
         Entry.Serialize(writer);
         Entry.WriteBuffLayers(writer);
+        writer.Put(Entry.HealthTimestamp);
     }
 
     public void Deserialize(NetPacketReader reader)
     {
         Entry.Deserialize(reader);
         if (reader.AvailableBytes > 0) Entry.ReadBuffLayers(reader);
+        Entry.HealthTimestamp = reader.AvailableBytes >= sizeof(double) ? reader.GetDouble() : 0d;
     }
 }

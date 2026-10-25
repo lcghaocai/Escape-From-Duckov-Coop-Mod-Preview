@@ -35,6 +35,9 @@ public struct AISnapshotChunkRpc : IRpcMessage
         // Keep the legacy inline entries intact; optional layers follow the entire chunk.
         for (var i = 0; i < count; i++)
             (list != null ? list[i] : Entries[i]).WriteBuffLayers(writer);
+        // Optional health stamps are a separate tail, preserving legacy entry boundaries.
+        for (var i = 0; i < count; i++)
+            writer.Put((list != null ? list[i] : Entries[i]).HealthTimestamp);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -50,6 +53,8 @@ public struct AISnapshotChunkRpc : IRpcMessage
         }
         for (var i = 0; i < count && reader.AvailableBytes > 0; i++)
             Entries[i].ReadBuffLayers(reader);
+        if (reader.AvailableBytes >= count * sizeof(double))
+            for (var i = 0; i < count; i++) Entries[i].HealthTimestamp = reader.GetDouble();
     }
 }
 
@@ -57,6 +62,7 @@ public struct AISnapshotEntry
 {
     // Local receipt order survives the deferred snapshot queue; it is not serialized.
     internal long HealthReceiveOrder;
+    public double HealthTimestamp;
     internal long BuffReceiveOrder;
     public int Id;
     public int SceneBuildIndex;

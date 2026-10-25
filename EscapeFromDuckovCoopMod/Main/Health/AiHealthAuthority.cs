@@ -7,8 +7,10 @@ public sealed partial class AISyncService
 {
     private static readonly System.Reflection.FieldInfo FinalDamageProcessors = AccessTools.Field(typeof(Health), "finalDamageProcessFuncs");
     private readonly HealthSnapshotOrder _clientHealthOrder = new();
-    private readonly Dictionary<int, (AIHealthBroadcastRpc Message, long Order)> _clientPendingHealth = new();
-    private readonly Dictionary<int, double> _clientHealthTimestamp = new();
+    private readonly Dictionary<int, PendingHealthUpdates<AIHealthBroadcastRpc>> _clientPendingHealth = new();
+    private readonly HealthSyncClock _serverHealthClock = new();
+
+    internal double NextHealthTimestamp() => _serverHealthClock.Next(Time.unscaledTimeAsDouble);
 
     public void Client_HandleHealthBroadcast(AIHealthBroadcastRpc message)
     {
@@ -16,26 +18,38 @@ public sealed partial class AISyncService
         var order = _clientHealthOrder.Receive();
         if (!CoopSyncDatabase.AI.TryGet(message.Id, out var entry) || entry == null)
         {
-            _clientPendingHealth[message.Id] = (message, order);
+            if (!_clientPendingHealth.TryGetValue(message.Id, out var pending))
+                _clientPendingHealth[message.Id] = pending = new();
+            pending.Add(message, order, message.Timestamp,
+                message.ConfirmedDamage > 0f || message.KillerCredit || message.AssistCredit);
             Client_TryScheduleSnapshotRecovery(true);
             return;
         }
-        Client_ApplyHealthBroadcast(entry, message, order);
+        // Hit feedback and quest credit are events, not replaceable health state.
+        // Raise credit before destroying the replica so its native EXP data is available.
+        Client_ApplyHealthEvents(entry, in message);
+        Client_ApplyHealthState(entry, in message, order);
     }
 
-    private void Client_ApplyHealthBroadcast(AISyncEntry entry, AIHealthBroadcastRpc message, long order)
+    private void Client_ApplyHealthState(AISyncEntry entry, in AIHealthBroadcastRpc message, long order)
     {
-        if (!_clientHealthOrder.TryApply(entry.Id, order)) return;
-        if (message.Timestamp > 0d)
-        {
-            if (_clientHealthTimestamp.TryGetValue(entry.Id, out var lastTimestamp) && message.Timestamp <= lastTimestamp)
-                return;
-            _clientHealthTimestamp[entry.Id] = message.Timestamp;
-        }
+        if (!_clientHealthOrder.TryApply(entry.Id, order, message.Timestamp)) return;
         if (message.MaxHealth > 0f) entry.MaxHealth = message.MaxHealth;
         entry.CurrentHealth = message.CurrentHealth;
         entry.BodyArmor = message.BodyArmor;
         entry.HeadArmor = message.HeadArmor;
+        if (message.IsDead)
+        {
+            entry.Status = AIStatus.Dead;
+            Client_DestroyReplica(entry.Id, AIStatus.Dead);
+            return;
+        }
+        if (_clientReplicas.TryGetValue(entry.Id, out var replica))
+            replica.ApplyHealth(entry.MaxHealth, entry.CurrentHealth, entry.BodyArmor, entry.HeadArmor);
+    }
+
+    private void Client_ApplyHealthEvents(AISyncEntry entry, in AIHealthBroadcastRpc message)
+    {
         if (message.ConfirmedDamage > 0f && PopText.instance)
         {
             var look = GameplayDataSettings.UIStyle.GetElementDamagePopTextLook(ElementTypes.physics);
@@ -46,22 +60,16 @@ public sealed partial class AISyncService
         }
         if (message.ConfirmedDamage > 0f && message.HasDamage)
             LocalHitKillFx.ClientPlayConfirmedAiHit(message.Damage.ToDamageInfo(CharacterMainControl.Main));
-        if (message.IsDead)
-        {
-            entry.Status = AIStatus.Dead;
-            if (message.KillerCredit || message.AssistCredit) Client_RaiseQuestKillCredit(entry.Id, in message);
-            Client_DestroyReplica(entry.Id, AIStatus.Dead);
-            return;
-        }
-        if (_clientReplicas.TryGetValue(entry.Id, out var replica))
-            replica.ApplyHealth(entry.MaxHealth, entry.CurrentHealth, entry.BodyArmor, entry.HeadArmor);
+        if (message.IsDead && (message.KillerCredit || message.AssistCredit))
+            Client_RaiseQuestKillCredit(entry.Id, in message);
     }
 
     private void Client_ApplyPendingHealth(AISyncEntry entry)
     {
         if (!_clientPendingHealth.TryGetValue(entry.Id, out var pending)) return;
         _clientPendingHealth.Remove(entry.Id);
-        Client_ApplyHealthBroadcast(entry, pending.Message, pending.Order);
+        foreach (var message in pending.Events) Client_ApplyHealthEvents(entry, in message);
+        Client_ApplyHealthState(entry, pending.Message, pending.Order);
     }
 
     public void Server_HandleHealthReport(RpcContext context, AIHealthReportRpc message)
@@ -139,7 +147,8 @@ public sealed partial class AISyncService
             IsDead = health.IsDead,
             HasDamage = true,
             Damage = DamageForwardPayload.FromDamageInfo(resolvedDamage),
-            ConfirmedDamage = confirmedDamage
+            ConfirmedDamage = confirmedDamage,
+            Timestamp = NextHealthTimestamp()
         };
         CoopTool.SendRpcTo(context.Sender, in confirmed);
     }

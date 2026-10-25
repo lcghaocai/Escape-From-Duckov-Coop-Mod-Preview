@@ -13,5 +13,14 @@
     <Compile Include="../../EscapeFromDuckovModApi/Networking/CoopPeer.cs" Link="Production/CoopPeer.cs" />
     <Compile Include="../../EscapeFromDuckovModApi/Networking/CoopPacketReader.cs" Link="Production/CoopPacketReader.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Main/Op.cs" Link="Production/Op.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Main/Health/HealthSnapshotOrder.cs" Link="Production/HealthSnapshotOrder.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Main/Health/HealthSyncClock.cs" Link="Production/HealthSyncClock.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Main/Health/PlayerDeathReports.cs" Link="Production/PlayerDeathReports.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/IRpcMessage.cs" Link="Production/IRpcMessage.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/RpcAttribute.cs" Link="Production/RpcAttribute.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/AISnapshotChunkRpc.cs" Link="Production/AISnapshotChunkRpc.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/AISpawnRpc.cs" Link="Production/AISpawnRpc.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/NetDataExtensions.cs" Link="Production/NetDataExtensions.cs" />
+    <Compile Include="../../EscapeFromDuckovModApi/ItemSnapshots.cs" Link="Production/ItemSnapshots.cs" />
   </ItemGroup>
 </Project>

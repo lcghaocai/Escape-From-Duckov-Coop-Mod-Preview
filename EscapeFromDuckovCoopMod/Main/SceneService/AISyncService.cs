@@ -284,7 +284,6 @@ public sealed partial class AISyncService
             _clientReplicaRecoveryTimes.Clear();
             _clientLastDamage.Clear();
             _clientHealthOrder.Clear();
-            _clientHealthTimestamp.Clear();
             _clientPendingHealth.Clear();
             _clientEntryBufferVersion = -1;
             _clientAnchorFrame = -1;
@@ -766,16 +765,16 @@ public sealed partial class AISyncService
         if (!IsClientEntryInRange(in message.Entry, GetClientSnapshotRange(message.Entry.IsVehicle)) && !HasNativeArea(message.Entry.CharacterPresetKey))
             return;
 
-        // Reliable spawn notifications distinguish a new living actor from a repeated death credit.
-        if (message.Entry.Status != AIStatus.Dead && message.Entry.CurrentHealth > 0f &&
-            _clientQuestKillCreditRaised.Remove(message.Entry.Id))
-            _clientLastDamage.Remove(message.Entry.Id);
-
         var entry = CoopSyncDatabase.AI.GetOrCreate(message.Entry.Id);
         var snapshot = message.Entry;
         snapshot.HealthReceiveOrder = _clientHealthOrder.Receive();
         snapshot.BuffReceiveOrder = _clientBuffOrder.Receive();
         ApplySnapshot(entry, in snapshot);
+
+        // A delayed pre-death spawn must not reset the once-only kill credit.
+        if (entry.Status != AIStatus.Dead && entry.CurrentHealth > 0f &&
+            _clientQuestKillCreditRaised.Remove(entry.Id))
+            _clientLastDamage.Remove(entry.Id);
 
         _clientRequested.Remove(entry.Id);
 
@@ -2111,7 +2110,7 @@ public sealed partial class AISyncService
             HasDamage = damage.HasValue,
             Damage = damage ?? default,
             KillerCredit = false,
-            Timestamp = Time.unscaledTimeAsDouble
+            Timestamp = NextHealthTimestamp()
         };
 
         var signature = ComputeHealthSignature(in message);
@@ -2161,7 +2160,7 @@ public sealed partial class AISyncService
             Damage = payload,
             KillerCredit = true,
             QuestEvidence = SharedHome.Active ? null : AiQuestCredit.Evidence(entry.Id, peer),
-            Timestamp = Time.unscaledTimeAsDouble
+            Timestamp = NextHealthTimestamp()
         };
 
         var writer = RpcWriterPool.Rent();
@@ -2369,6 +2368,7 @@ public sealed partial class AISyncService
 
         var snapshot = new AISnapshotEntry
         {
+            HealthTimestamp = NextHealthTimestamp(),
             Id = entry.Id,
             SceneBuildIndex = entry.SceneBuildIndex,
             ScenePath = entry.ScenePath ?? string.Empty,
@@ -2609,7 +2609,7 @@ public sealed partial class AISyncService
         entry.ScenePath = snapshot.ScenePath;
         entry.Team = snapshot.Team;
         var forceSpawn = IsForceSpawnModel(snapshot.ModelName) || snapshot.IsVehicle;
-        var applyHealth = _clientHealthOrder.TryApply(entry.Id, snapshot.HealthReceiveOrder);
+        var applyHealth = _clientHealthOrder.TryApply(entry.Id, snapshot.HealthReceiveOrder, snapshot.HealthTimestamp);
         if (applyHealth)
         {
             entry.Status = forceSpawn && snapshot.Status != AIStatus.Dead

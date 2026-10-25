@@ -145,6 +145,12 @@ public static class CoopTool
         SendRpcWithDelivery(in message, RpcRegistry.GetDescriptor<T>().Delivery, excludePeer);
     }
 
+    internal static void SendOrderedRpc<T>(in T message, NetPeer excludePeer = null)
+        where T : struct, IRpcMessage
+    {
+        SendRpcWithDelivery(in message, DeliveryMethod.ReliableOrdered, excludePeer);
+    }
+
     internal static void SendUnreliableRpc<T>(in T message, NetPeer excludePeer = null)
         where T : struct, IRpcMessage
     {
