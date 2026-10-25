@@ -16,8 +16,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using Cysharp.Threading.Tasks;
 using System.Linq;
+using HarmonyLib;
 using LiteNetLib;
 using ItemStatsSystem;
 using ItemStatsSystem.Items;
@@ -746,6 +748,10 @@ namespace EscapeFromDuckovCoopMod;
         _cliVersions[inv] = Mathf.Max(rpc.Version, curVersion);
 
         _applyingLootState = true;
+        Delegate suspendedContentChanged = null;
+        FieldInfo contentChangedField = null;
+        if (rpc.IsSnapshot && rpc.Capacity >= 64)
+            suspendedContentChanged = SuspendInventoryContentChanged(inv, out contentChangedField);
         try
         {
             if (rpc.IsSnapshot)
@@ -855,7 +861,43 @@ namespace EscapeFromDuckovCoopMod;
         {
             _cliPutReceipts.Apply(inv, rpc.IsSnapshot ? null : rpc.Slot);
             if (rpc.IsSnapshot) _cliInitializedLoot.Add(inv);
+            if (suspendedContentChanged != null && contentChangedField != null)
+            {
+                try
+                {
+                    contentChangedField.SetValue(inv, suspendedContentChanged);
+                    // 700 个槽位逐个 Remove/Add 时 UI 会刷新 700 次；
+                    // 批量应用期间摘掉监听，最后只通知一次，让 UI 重建一次。
+                    try { suspendedContentChanged.DynamicInvoke(inv, -1); }
+                    catch
+                    {
+                        try { suspendedContentChanged.DynamicInvoke(inv, 0); }
+                        catch { }
+                    }
+                }
+                catch (Exception e)
+                {
+                    CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] bulk UI refresh restore failed: {e.Message}");
+                }
+            }
             _applyingLootState = false;
+        }
+    }
+
+    private static Delegate SuspendInventoryContentChanged(Inventory inv, out FieldInfo field)
+    {
+        field = AccessTools.Field(typeof(Inventory), "onContentChanged");
+        if (field == null) return null;
+        var handler = field.GetValue(inv) as Delegate;
+        if (handler == null) return null;
+        try
+        {
+            field.SetValue(inv, null);
+            return handler;
+        }
+        catch
+        {
+            return null;
         }
     }
 

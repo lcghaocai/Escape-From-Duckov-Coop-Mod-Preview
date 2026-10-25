@@ -22,8 +22,10 @@ namespace EscapeFromDuckovCoopMod.Patch.UI;
 [HarmonyPatch(typeof(Duckov.UI.LootView), "OnStartLoot")]
 internal static class LootViewPatch
 {
-    private static void Postfix(InteractableLootbox lootbox)
+    private static void Postfix(Duckov.UI.LootView __instance, InteractableLootbox lootbox)
     {
+        ConfigurePagination(__instance, lootbox != null ? lootbox.Inventory : null);
+
         var service = NetService.Instance;
         var lootNet = COOPManager.LootNet;
 
@@ -36,6 +38,32 @@ internal static class LootViewPatch
 
         lootNet.Client_SetLootActive(inv, true);
         lootNet.Client_RequestLootState(inv);
+    }
+
+    private static void ConfigurePagination(Duckov.UI.LootView view, Inventory inventory)
+    {
+        if (view == null || inventory == null || inventory.Capacity <= 96) return;
+
+        try
+        {
+            var display = AccessTools.Field(typeof(Duckov.UI.LootView), "lootTargetInventoryDisplay")
+                ?.GetValue(view) as Duckov.UI.InventoryDisplay;
+            if (display == null) return;
+
+            var usePages = AccessTools.FieldRefAccess<Duckov.UI.InventoryDisplay, bool>("usePages");
+            var itemsEachPage = AccessTools.FieldRefAccess<Duckov.UI.InventoryDisplay, int>("itemsEachPage");
+            usePages(display) = true;
+            var perPage = itemsEachPage(display);
+            if (perPage <= 0 || perPage > 80)
+                itemsEachPage(display) = 50;
+
+            // 大仓库只渲染当前页，避免一次创建/布局 700 个槽位。
+            display.SetPage(Mathf.Clamp(display.SelectedPage, 0, display.MaxPage));
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"[LOOT] configure pagination failed: {e.Message}");
+        }
     }
 }
 
