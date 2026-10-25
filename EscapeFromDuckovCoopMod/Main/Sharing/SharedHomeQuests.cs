@@ -1,6 +1,9 @@
 using Duckov.Quests;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using QuestTask = Duckov.Quests.Task;
 using Object = UnityEngine.Object;
 
@@ -10,8 +13,10 @@ internal static class SharedHomeQuests
 {
     private static readonly Dictionary<string, object> Baselines = new();
     private static bool _reloadPending;
+    private static bool _suppressQuestDataCapture;
     private static float _nextReloadTime;
     private const float ReloadCoalesceSeconds = 0.5f;
+
     internal static void Init()
     {
         Quest.onQuestStatusChanged += _ => SharedHome.MarkDirty();
@@ -31,6 +36,82 @@ internal static class SharedHomeQuests
             SharedHome.Request("task", new { quest = task.Master.ID, task = task.ID, delta, value });
         }
         Baselines[key] = value;
+    }
+
+    /// <summary>
+    /// 主机只广播单个任务的进度，不再为每次进度变化重发整份 QuestData。
+    /// 这样客机不会销毁/重建任务列表。
+    /// </summary>
+    internal static void Server_BroadcastTask(QuestTask task)
+    {
+        if (!task || !NetService.Instance.IsServer || !SharedHome.Active) return;
+        var value = task.GenerateSaveData();
+        if (value is not int && value is not bool) return;
+
+        var data = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+        {
+            quest = task.Master.ID,
+            task = task.ID,
+            value
+        }));
+        SharedHome.SendPrivate(12, data);
+
+        // 任务尚未完成时，QuestData 的变化只是这一条进度；本次 Capture 跳过整份 QuestData。
+        // 完成/激活仍走完整快照，保证任务列表状态正确。
+        if (!task.IsFinished())
+            _suppressQuestDataCapture = true;
+    }
+
+    internal static bool ConsumeSuppressQuestDataCapture()
+    {
+        if (!_suppressQuestDataCapture) return false;
+        _suppressQuestDataCapture = false;
+        return true;
+    }
+
+    internal static void ReceiveTaskDelta(byte[] data)
+    {
+        if (data == null || data.Length == 0 || !SharedHome.Guest) return;
+        try
+        {
+            var args = JObject.Parse(Encoding.UTF8.GetString(data));
+            var questId = (int)args["quest"];
+            var taskId = (int)args["task"];
+            var manager = QuestManager.Instance;
+            if (!manager) return;
+
+            var quest = manager.ActiveQuests.Concat(manager.HistoryQuests)
+                .FirstOrDefault(q => q && q.ID == questId);
+            var task = quest?.Tasks.FirstOrDefault(t => t && t.ID == taskId);
+            if (!task) return;
+
+            var token = args["value"];
+            SharedHome.Apply(() =>
+            {
+                if (token != null && token.Type == JTokenType.Integer)
+                {
+                    task.SetupSaveData((int)token);
+                }
+                else if (token != null && token.Type == JTokenType.Boolean)
+                {
+                    var flag = (bool)token;
+                    if (task is Duckov.Quests.Tasks.QuestTask_CheckSaveData check)
+                        SharedHomeWorld.SetFlag(check.SaveDataKey, flag);
+                    else
+                        task.SetupSaveData(flag);
+                }
+                else
+                {
+                    return;
+                }
+
+                AccessTools.Method(typeof(QuestTask), "ReportStatusChanged")?.Invoke(task, null);
+            });
+        }
+        catch (System.Exception e)
+        {
+            CoopLogSystem.WriteNetworkDiagnostic($"[SharedHome] quest task delta failed: {e}");
+        }
     }
     internal static void Reload()
     {
