@@ -1004,15 +1004,32 @@ public sealed partial class AISyncService
         var spawned = 0;
         while (spawned < MaxReplicaSpawnsPerFrame && _clientReplicaSpawnQueue.Count > 0)
         {
-            var id = _clientReplicaSpawnQueue.Dequeue();
+            // A nearby attacker must not sit behind a FIFO of distant scenery/AI.
+            var id = 0;
+            var nearest = float.PositiveInfinity;
+            var hasAnchor = TryGetClientAnchor(out var anchor);
+            var candidates = _clientReplicaSpawnQueue.Count;
+            for (var i = 0; i < candidates; i++)
+            {
+                var candidate = _clientReplicaSpawnQueue.Dequeue();
+                if (_clientReplicas.ContainsKey(candidate) || _clientReplicaSpawning.Contains(candidate) ||
+                    !CoopSyncDatabase.AI.TryGet(candidate, out var queued) || !ShouldHaveClientReplica(queued))
+                {
+                    _clientReplicaSpawnQueued.Remove(candidate);
+                    continue;
+                }
+                var distance = hasAnchor ? (GetEntryAnchor(queued) - anchor).sqrMagnitude : 0f;
+                if (id == 0 || distance < nearest)
+                {
+                    if (id != 0) _clientReplicaSpawnQueue.Enqueue(id);
+                    id = candidate;
+                    nearest = distance;
+                }
+                else _clientReplicaSpawnQueue.Enqueue(candidate);
+            }
+            if (id == 0) break;
             _clientReplicaSpawnQueued.Remove(id);
-
-            if (_clientReplicas.ContainsKey(id) || _clientReplicaSpawning.Contains(id))
-                continue;
-
-            if (!CoopSyncDatabase.AI.TryGet(id, out var entry) || entry == null || !ShouldHaveClientReplica(entry))
-                continue;
-
+            if (!CoopSyncDatabase.AI.TryGet(id, out var entry)) continue;
             _clientReplicaSpawning.Add(id);
             SpawnReplicaAsync(entry).Forget();
             spawned++;
@@ -2757,15 +2774,6 @@ public sealed partial class AISyncService
             }
 
             ApplyCustomFace(cmc.characterModel, entry.CustomFaceJson);
-            await ApplyEquipmentAsync(cmc.characterModel, new Dictionary<string, int>(entry.Equipment),
-                new Dictionary<string, int>(entry.Weapons), new Dictionary<string, ItemSnapshot>(entry.WeaponSnapshots),
-                GetActiveWeaponSlot(entry.Id), GetActiveWeaponType(entry.Id));
-            if (!Client_CanCompleteReplicaSpawn(entry, generation))
-            {
-                Object.Destroy(instance);
-                return;
-            }
-            TryApplyVehicleSpeedStats(characterItemInstance, entry);
 
            // MultiplyCharacterStat(characterItemInstance, "WalkSpeed", cmc.characterPreset.moveSpeedFactor);
            // MultiplyCharacterStat(characterItemInstance, "RunSpeed", cmc.characterPreset.moveSpeedFactor);
@@ -2815,7 +2823,7 @@ public sealed partial class AISyncService
                 cmc.Health.showHealthBar = false;
             }
 
-            var replica = new RemoteAIReplica(entry.Id, instance, cmc, entry, this);
+            var replica = new RemoteAIReplica(entry.Id, instance, cmc, entry, this, equipmentLoading: true);
             _clientReplicas[entry.Id] = replica;
             completed = true;
             replica.ApplyState(entry);
@@ -2823,6 +2831,14 @@ public sealed partial class AISyncService
             FlushClientPendingBuffs(entry.Id, replica);
             cmc.gameObject.SetActive(false);
             cmc.gameObject.SetActive(true);
+            // Show and synchronize the actor before optional equipment finishes loading.
+            // Retain the spawn concurrency limit while loading gear to bound asset work.
+            await ApplyEquipmentAsync(cmc.characterModel, new Dictionary<string, int>(entry.Equipment),
+                new Dictionary<string, int>(entry.Weapons), new Dictionary<string, ItemSnapshot>(entry.WeaponSnapshots),
+                GetActiveWeaponSlot(entry.Id), GetActiveWeaponType(entry.Id));
+            if (!instance || !Client_CanCompleteReplicaSpawn(entry, generation)) return;
+            TryApplyVehicleSpeedStats(characterItemInstance, entry);
+            replica.CompleteEquipmentLoading(entry);
             ModApiEvents.RaiseAiSpawned(entry.Id, cmc);
             if (entry.IsVehicle)
                 LevelDataBoolNet.TryApplyCachedVehicleRequiredItems(entry.Id, cmc);
@@ -3936,6 +3952,7 @@ public sealed partial class AISyncService
         private int _lastEntryApplySignature = int.MinValue;
         private int _lastActiveWeaponTypeId;
         private int _pendingActiveWeaponTypeId;
+        private bool _equipmentLoading;
         private float _lastPushedStateReceivedTime = -1f;
         private bool _hasLastPushedTransform;
         private Vector3 _lastPushedPosition;
@@ -3950,12 +3967,13 @@ public sealed partial class AISyncService
         private static readonly int MoveDirYHash = Animator.StringToHash("MoveDirY");
         private static readonly int VehicleTypeHash = Animator.StringToHash("VehicleType");
 
-        public RemoteAIReplica(int id, GameObject instance, CharacterMainControl character, AISyncEntry entry, AISyncService service)
+        public RemoteAIReplica(int id, GameObject instance, CharacterMainControl character, AISyncEntry entry, AISyncService service, bool equipmentLoading = false)
         {
             Id = id;
             Instance = instance;
             Character = character;
             _service = service;
+            _equipmentLoading = equipmentLoading;
             _animInterp = AnimInterpUtil.Attach(instance);
             _netInterp = NetInterpUtil.Attach(instance);
             _health = character ? character.Health : null;
@@ -3988,6 +4006,13 @@ public sealed partial class AISyncService
                 _health.OnHurtEvent.AddListener(OnHurt);
             }
             ApplyTeam(entry.Team);
+            ApplyState(entry);
+        }
+
+        public void CompleteEquipmentLoading(AISyncEntry entry)
+        {
+            _equipmentLoading = false;
+            _lastEntryApplySignature = int.MinValue;
             ApplyState(entry);
         }
 
@@ -4068,7 +4093,7 @@ public sealed partial class AISyncService
                 }
             }
 
-            if (activeWeaponTypeId != _lastActiveWeaponTypeId &&
+            if (!_equipmentLoading && activeWeaponTypeId != _lastActiveWeaponTypeId &&
                 activeWeaponTypeId != _pendingActiveWeaponTypeId)
                 EnsureActiveWeaponAsync(entry, activeWeaponTypeId).Forget();
         }

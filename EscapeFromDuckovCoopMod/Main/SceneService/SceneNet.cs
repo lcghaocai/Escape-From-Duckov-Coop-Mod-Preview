@@ -84,6 +84,9 @@ public class SceneNet : MonoBehaviour
     private float _cliForceSpawnDeadline;
     private Vector3 _cliHostSpawnPosition;
     private Quaternion _cliHostSpawnRotation;
+    private string _cliHostSpawnSceneId;
+    private bool _cliSpawnTransferPending;
+    private int _cliSpawnGeneration;
 
     private bool _srvSceneGateOpen;
     private NetService Service => NetService.Instance;
@@ -133,7 +136,14 @@ public class SceneNet : MonoBehaviour
         // 不要只等 MainCharacter 出现：InitLevel 还没跑完时角色可能仍在旧位置/默认位置，
         // 这时发 SCENE_READY 会让主机用旧坐标创建远端克隆，表现为“生成在地图外”。
         var lm = LevelManager.Instance;
-        if (lm == null || !LevelManager.LevelInited || lm.MainCharacter == null) return;
+        // LevelInited precedes the native final SetPosition by an async delay.
+        if (lm == null || !LevelManager.AfterInit || lm.MainCharacter == null ||
+            SceneLoader.IsSceneLoading || MultiSceneCore.Instance?.IsLoading == true) return;
+        if (!IsServer && _cliPendingPostLoadSnap && _cliHostReadyReceived)
+        {
+            if (!Client_TrySnapToHostAnchor(true)) return;
+            _cliForceSpawnAtHost = false;
+        }
 
         if (!IsServer && _cliForceSpawnAtHost && sceneLocationName == "OnPointerClick")
         {
@@ -457,6 +467,9 @@ public class SceneNet : MonoBehaviour
         sceneUseLocation = message.UseLocation;
         sceneLocationName = message.LocationName ?? string.Empty;
 
+        _cliSpawnGeneration++;
+        _cliSpawnTransferPending = false;
+        _cliHostSpawnSceneId = null;
         _cliForceSpawnAtHost = message.ForceSpawnAtHost && sceneLocationName == "OnPointerClick";
         // Start the timeout only once this client has initialized the destination.
         _cliForceSpawnDeadline = 0f;
@@ -514,6 +527,7 @@ public class SceneNet : MonoBehaviour
         }
 
         _cliHostReadyReceived = true;
+        _cliHostSpawnSceneId = sceneId;
         _cliHostSpawnPosition = pos;
         _cliHostSpawnRotation = rot;
         _cliPendingPostLoadSnap = true;
@@ -540,28 +554,65 @@ public class SceneNet : MonoBehaviour
     private bool Client_TrySnapToHostAnchor(bool markPostLoadApplied = false)
     {
         // Cache early host READY messages; never teleport the character in the old map.
-        if (!LevelManager.LevelInited ||
+        if (!LevelManager.AfterInit || SceneLoader.IsSceneLoading ||
+            MultiSceneCore.Instance == null || MultiSceneCore.Instance.IsLoading ||
             (!SceneIdsMatch(sceneTargetId, MultiSceneCore.MainSceneID) &&
              !SceneIdsMatch(sceneTargetId, MultiSceneCore.ActiveSubSceneID))) return false;
         var main = CharacterMainControl.Main;
         var modelRoot = main != null ? main.modelRoot : null;
-        var controller = main != null ? main.GetComponent<CharacterController>() : null;
 
         if (main == null || modelRoot == null)
             return false;
 
-        if (controller != null)
-            controller.enabled = false;
+        if (!string.IsNullOrEmpty(_cliHostSpawnSceneId) &&
+            !string.Equals(_cliHostSpawnSceneId, MultiSceneCore.ActiveSubSceneID, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(_cliHostSpawnSceneId, MultiSceneCore.MainSceneID, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!_cliSpawnTransferPending)
+            {
+                _cliSpawnTransferPending = true;
+                Client_LoadHostSpawnScene(_cliSpawnGeneration, LevelManager.Instance,
+                    _cliHostSpawnSceneId, _cliHostSpawnPosition).Forget();
+            }
+            return false;
+        }
 
-        main.transform.position = _cliHostSpawnPosition;
+        // ECM2 owns the character position/velocity. A Transform write alone is insufficient.
+        main.SetPosition(_cliHostSpawnPosition);
         modelRoot.transform.rotation = _cliHostSpawnRotation;
 
-        if (controller != null)
-            controller.enabled = true;
-
         if (markPostLoadApplied)
+        {
             _cliPendingPostLoadSnap = false;
+            CoopLogSystem.WriteNetworkDiagnostic($"[SCENE] SpawnTogether applied scene='{MultiSceneCore.ActiveSubSceneID}' pos={main.transform.position}");
+        }
         return true;
+    }
+
+    private async UniTaskVoid Client_LoadHostSpawnScene(int generation, LevelManager level, string sceneId, Vector3 position)
+    {
+        try
+        {
+            AuthorizeLocalSceneLoad(sceneId);
+            CoopLogSystem.WriteNetworkDiagnostic($"[SCENE] SpawnTogether loading host sub-scene='{sceneId}'");
+            var loaded = await MultiSceneCore.Instance.LoadAndTeleport(sceneId, position, false);
+            if (generation != _cliSpawnGeneration || !networkStarted || LevelManager.Instance != level) return;
+            if (!loaded) throw new InvalidOperationException("Unable to load host spawn sub-scene " + sceneId);
+            // Complete through TrySendSceneReadyOnce after the native scene operation settles.
+            _sceneReadySidSent = null;
+        }
+        catch (Exception ex)
+        {
+            if (generation != _cliSpawnGeneration || LevelManager.Instance != level) return;
+            // Leave the native local spawn intact; never put world coordinates into an unloaded sub-scene.
+            _cliPendingPostLoadSnap = false;
+            _cliForceSpawnAtHost = false;
+            CoopLogSystem.WriteNetworkDiagnostic($"[SCENE] SpawnTogether sub-scene failed: {ex.Message}");
+        }
+        finally
+        {
+            if (generation == _cliSpawnGeneration) _cliSpawnTransferPending = false;
+        }
     }
 
     public void Client_OnLevelInitialized_PostLoad()
@@ -586,6 +637,11 @@ public class SceneNet : MonoBehaviour
 
     public void ResetTeleporterVote()
     {
+        _cliSpawnGeneration++;
+        _cliSpawnTransferPending = false;
+        _cliHostReadyReceived = false;
+        _cliPendingPostLoadSnap = false;
+        _cliForceSpawnAtHost = false;
         _srvPendingBeginLoad = false;
         _srvPendingSceneLoad = false;
         _localSceneLoadLaunched = false;

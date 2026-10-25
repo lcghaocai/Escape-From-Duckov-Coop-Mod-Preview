@@ -94,3 +94,12 @@ Review follow-up: 1.4.2.5
 - User-excluded player damage request throttling is byte-for-byte unchanged.
 - Release build succeeded; all 20 scheduling/wire checks passed. No multiplayer game test performed. Host and all clients must use 1.4.2.5.
 - Integrated upstream 47a5c23 before push: preserve remote clone position correction and post-load snapping, retaining main-scene identity and destination initialization guards.
+
+Spawn outside map / late visible AI follow-up: 1.4.2.6
+- Inspected installed TeamSoda.Duckov.Core.dll IL: LevelInited becomes true before an awaited 0.25s delay and final CharacterMainControl.SetPosition; AfterInit becomes true after OnAfterLevelInitialized.
+- CharacterMainControl.SetPosition calls Movement.ForceSetPosition, updating ECM2 position, pausing the ground constraint and zeroing velocity. Spawn correction now uses this API, not a bare Transform write.
+- Scene READY and anchor correction wait for AfterInit and loading completion. A different host sub-scene is loaded with native LoadAndTeleport using world coordinates before applying the anchor. Pending transfers are invalidated on a new load/reset.
+- AI spawn work selects the nearest eligible actor first. A passive actor with authoritative health becomes visible and interpolated before equipment finishes; concurrent asset loads remain limited to two. Active weapon loading is suppressed until initial gear completes to avoid duplicate equipment creation.
+- Release build passed. Existing 20 network checks passed in the preceding 1.4.2.5 change; these Unity lifecycle/render changes still need multiplayer gameplay verification.
+- Latest observed log: 20:44:38 backlog=629 combat=11; client rejected Farm_01 against Farm_Main at 20:44:41. These samples do not prove the entire visibility delay is asset loading.
+- User-excluded player damage request throttling remains unchanged.
