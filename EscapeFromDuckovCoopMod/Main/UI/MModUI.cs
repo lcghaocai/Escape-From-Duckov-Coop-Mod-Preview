@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -418,6 +418,9 @@ public class MModUI : MonoBehaviour
         // 初始化组件容器和布局构建器
         _components = new MModUIComponents();
         _layoutBuilder = new MModUILayoutBuilder(this, _components);
+
+        _manualIP = PlayerPrefs.GetString(NetService.ManualIpPrefKey, _manualIP);
+        _manualPort = PlayerPrefs.GetString(NetService.ManualPortPrefKey, _manualPort);
 
         var svc = Service;
         if (svc != null)

@@ -163,6 +163,9 @@ public class ModUI : MonoBehaviour
     public void Init()
     {
         Instance = this;
+        _manualIP = PlayerPrefs.GetString(NetService.ManualIpPrefKey, _manualIP);
+        _manualPort = PlayerPrefs.GetString(NetService.ManualPortPrefKey, _manualPort);
+
         var svc = Service;
         if (svc != null)
         {

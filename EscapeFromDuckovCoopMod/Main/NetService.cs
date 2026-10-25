@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -39,6 +39,8 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
     public string status = "";
     public string manualIP = "127.0.0.1";
     public string manualPort = "9050";
+    internal const string ManualIpPrefKey = "Coop.ManualIP";
+    internal const string ManualPortPrefKey = "Coop.ManualPort";
     public bool networkStarted;
     private string _selfNetworkId;
     public float broadcastTimer;
@@ -68,6 +70,15 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
     public NetworkTransportMode TransportMode { get; private set; } = NetworkTransportMode.Direct;
     public SteamLobbyOptions LobbyOptions { get; private set; } = SteamLobbyOptions.CreateDefault();
     private readonly Dictionary<string, float> _playerInvincibleUntil = new(StringComparer.OrdinalIgnoreCase);
+
+    private void Awake()
+    {
+        // 记住上一次手动连接的地址，避免每次启动都被 127.0.0.1:9050 覆盖。
+        manualIP = PlayerPrefs.GetString(ManualIpPrefKey, manualIP);
+        manualPort = PlayerPrefs.GetString(ManualPortPrefKey, manualPort);
+        if (string.IsNullOrWhiteSpace(manualIP)) manualIP = "127.0.0.1";
+        if (string.IsNullOrWhiteSpace(manualPort)) manualPort = "9050";
+    }
 
     public void OnEnable()
     {
@@ -563,6 +574,8 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
             return;
         }
 
+        SaveManualEndpoint(ip, port);
+
         if (IsServer)
         {
             Debug.LogWarning(CoopLocalization.Get("net.serverModeCannotConnect"));
@@ -631,6 +644,14 @@ public class NetService : MonoBehaviour, ICoopNetworkListener, IModNetworkServic
         }
     }
 
+
+    public static void SaveManualEndpoint(string ip, int port)
+    {
+        if (string.IsNullOrWhiteSpace(ip) || port <= 0 || port > 65535) return;
+        PlayerPrefs.SetString(ManualIpPrefKey, ip.Trim());
+        PlayerPrefs.SetString(ManualPortPrefKey, port.ToString());
+        PlayerPrefs.Save();
+    }
 
     public string GetSelfNetworkId()
     {
