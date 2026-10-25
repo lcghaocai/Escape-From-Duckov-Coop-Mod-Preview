@@ -25,6 +25,9 @@ public class SceneNet : MonoBehaviour
 {
     public static SceneNet Instance;
     public string _sceneReadySidSent;
+    private string _sceneReadyPendingSid;
+    private float _sceneReadyEarliestTime;
+    private const float SceneReadySettleSeconds = 0.35f;
     public bool sceneVoteActive;
     public string sceneTargetId; // 统一的目标 SceneID
     public string sceneCurtainGuid; // 过场 GUID，可为空
@@ -126,6 +129,11 @@ public class SceneNet : MonoBehaviour
         if (!LocalPlayerManager.Instance.ComputeIsInGame(out var sid) || string.IsNullOrEmpty(sid)) return;
         if (_sceneReadySidSent == sid) return; // 去抖：本场景只发一次
 
+        // 不要只等 MainCharacter 出现：InitLevel 还没跑完时角色可能仍在旧位置/默认位置，
+        // 这时发 SCENE_READY 会让主机用旧坐标创建远端克隆，表现为“生成在地图外”。
+        var lm = LevelManager.Instance;
+        if (lm == null || !LevelManager.LevelInited || lm.MainCharacter == null) return;
+
         if (!IsServer && _cliForceSpawnAtHost && sceneLocationName == "OnPointerClick")
         {
             if (!_cliHostReadyReceived)
@@ -135,9 +143,19 @@ public class SceneNet : MonoBehaviour
                 return; // 角色未生成，延迟到下次再尝试
         }
 
-        var lm = LevelManager.Instance;
-        var pos = lm && lm.MainCharacter ? lm.MainCharacter.transform.position : Vector3.zero;
-        var rot = lm && lm.MainCharacter ? lm.MainCharacter.modelRoot.transform.rotation : Quaternion.identity;
+        // 等出生点稳定一小段时间（只对当前场景计一次），避免角色刚 InitLevel 完还在旧坐标时上报。
+        if (!string.Equals(_sceneReadyPendingSid, sid, StringComparison.OrdinalIgnoreCase))
+        {
+            _sceneReadyPendingSid = sid;
+            _sceneReadyEarliestTime = Time.unscaledTime + SceneReadySettleSeconds;
+        }
+        if (Time.unscaledTime < _sceneReadyEarliestTime) return;
+
+        // 先把当前真实位置发给主机，再发 SCENE_READY；主机收到后创建的远端克隆就不会落在旧位置。
+        if (!IsServer) SendLocalPlayerStatus.Instance?.SendPositionUpdate();
+
+        var pos = lm.MainCharacter.transform.position;
+        var rot = lm.MainCharacter.modelRoot.transform.rotation;
         var faceJson = CustomFace.LoadLocalCustomFaceJson() ?? string.Empty;
 
         writer.Reset();
@@ -148,7 +166,6 @@ public class SceneNet : MonoBehaviour
         writer.PutQuaternion(rot);
         writer.Put(faceJson);
 
-
         if (IsServer)
             // 主机广播（本机也等同已就绪，方便让新进来的客户端看到主机）
             netManager?.SendToAll(writer, DeliveryMethod.ReliableOrdered);
@@ -157,6 +174,8 @@ public class SceneNet : MonoBehaviour
 
         if (!IsServer && connectedPeer.ConnectionState != ConnectionState.Connected) return;
         _sceneReadySidSent = sid;
+        _sceneReadyPendingSid = null;
+        _sceneReadyEarliestTime = 0f;
         ClearLocalSceneLoadAuthorization();
     }
 
@@ -523,6 +542,8 @@ public class SceneNet : MonoBehaviour
         _srvGateReadyPids.Clear();
         _srvGateReadySids.Clear();
         _srvGateSid = null;
+        _sceneReadyPendingSid = null;
+        _sceneReadyEarliestTime = 0f;
         sceneVoteActive = false;
         sceneParticipantIds.Clear();
         sceneReady.Clear();
