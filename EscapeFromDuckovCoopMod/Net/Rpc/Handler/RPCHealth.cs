@@ -2,6 +2,11 @@ namespace EscapeFromDuckovCoopMod;
 
 public static class RPCHealth
 {
+    public static void HandlePlayerBuffSnapshot(RpcContext context, PlayerBuffSnapshotRpc message)
+    {
+        COOPManager.Buff?.HandleSnapshot(context, message);
+    }
+
     public static void HandlePlayerHealthReport(RpcContext context, PlayerHealthReportRpc message)
     {
         if (!context.IsServer) return;

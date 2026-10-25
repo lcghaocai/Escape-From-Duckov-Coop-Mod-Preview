@@ -581,9 +581,10 @@ public class ModBehaviourF : MonoBehaviour
                     var pos = reader.GetVector3(); // 初始位置
                     var rot = reader.GetQuaternion();
                     var face = reader.GetString();
+                    var mainSceneId = reader.AvailableBytes > 0 ? reader.GetString() : null;
 
                     if (IsServer) SceneNet.Instance.Server_HandleSceneReady(peer, id, sid, pos, rot, face);
-                    else SceneNet.Instance?.Client_OnRemoteSceneReady(id, sid, pos, rot);
+                    else SceneNet.Instance?.Client_OnRemoteSceneReady(id, sid, pos, rot, mainSceneId);
 
                     // 客户端若收到这条（主机广播），实际创建工作由 REMOTE_CREATE 完成，这里不处理
                     break;

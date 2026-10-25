@@ -122,7 +122,7 @@ public class HealthM : MonoBehaviour
             Damage = DamageForwardPayload.FromDamageInfo(damage),
             LifeId = _localDeathReport.LifeId,
             IsDead = health.IsDead,
-            Buffs = Buff_.CaptureLocal(),
+            Buffs = null, // Buff reconciliation uses the ordered buff stream.
             Timestamp = _healthClock.Next(Time.unscaledTimeAsDouble)
         };
 
@@ -131,6 +131,7 @@ public class HealthM : MonoBehaviour
         if (rpc.IsDead) CoopTool.SendOrderedRpc(in rpc);
         else CoopTool.SendRpc(in rpc);
 
+        COOPManager.Buff?.SendLocalSnapshot();
         _cliLastSentHp = (max, cur);
         _cliNextSendHp = now + CLIENT_SEND_INTERVAL;
 
@@ -202,7 +203,8 @@ public class HealthM : MonoBehaviour
 
         var timestamp = _healthClock.Next(Time.unscaledTimeAsDouble);
         _srvPlayerHealthTimestamp[playerId] = timestamp;
-        BroadcastPlayerSnapshot(playerId, max, cur, damage.HasValue ? DamageForwardPayload.FromDamageInfo(damage) : (DamageForwardPayload?)null, null, timestamp, Buff_.CaptureLocal());
+        BroadcastPlayerSnapshot(playerId, max, cur, damage.HasValue ? DamageForwardPayload.FromDamageInfo(damage) : (DamageForwardPayload?)null, null, timestamp);
+        COOPManager.Buff?.SendLocalSnapshot();
     }
 
     private static (float max, float cur) ReadHealth(Health health)
@@ -213,7 +215,7 @@ public class HealthM : MonoBehaviour
         return (max, cur);
     }
 
-    private void BroadcastPlayerSnapshot(string playerId, float max, float cur, DamageForwardPayload? damage, NetPeer excludePeer, double timestamp, PlayerBuffState[] buffs = null)
+    private void BroadcastPlayerSnapshot(string playerId, float max, float cur, DamageForwardPayload? damage, NetPeer excludePeer, double timestamp)
     {
         if (!IsServer || string.IsNullOrEmpty(playerId) || max <= 0f) return;
 
@@ -228,7 +230,7 @@ public class HealthM : MonoBehaviour
             CurrentHealth = cur,
             HasDamage = damage.HasValue,
             Damage = damage ?? default,
-            Buffs = buffs,
+            Buffs = null,
             Timestamp = timestamp
         };
 
@@ -267,8 +269,7 @@ public class HealthM : MonoBehaviour
             Server_TrySpawnMissingRemote(sender, playerId, max, cur);
         }
 
-        COOPManager.Buff?.ReceiveSnapshot(playerId, message.Buffs);
-        BroadcastPlayerSnapshot(playerId, max, cur, message.HasDamage ? message.Damage : (DamageForwardPayload?)null, sender, timestamp, message.Buffs);
+        BroadcastPlayerSnapshot(playerId, max, cur, message.HasDamage ? message.Damage : (DamageForwardPayload?)null, sender, timestamp);
     }
 
     public bool Server_CanSpawnDeathLoot(CoopPeer peer, string lifeId) => IsServer && networkStarted &&
@@ -359,8 +360,6 @@ public class HealthM : MonoBehaviour
         if (_cliPlayerHealthTimestamp.TryGetValue(message.PlayerId, out var lastTimestamp) && timestamp <= lastTimestamp)
             return;
         _cliPlayerHealthTimestamp[message.PlayerId] = timestamp;
-
-        COOPManager.Buff?.ReceiveSnapshot(message.PlayerId, message.Buffs);
 
         var max = Mathf.Max(1f, message.MaxHealth);
         var cur = Mathf.Clamp(message.CurrentHealth, 0f, max);

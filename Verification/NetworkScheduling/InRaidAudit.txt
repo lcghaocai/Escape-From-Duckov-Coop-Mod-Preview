@@ -85,3 +85,11 @@
 - 20:19:52 的 coalescedStates=37834 是累计淘汰旧状态样本数，不是当前排队量。
   日志没有排队时长，不能由队列条数直接推出伤害延迟；也没有双方配对的 F10 数据。
 - 推送前再次合入远端 55dfd8f 的任务进度增量同步；远端使用 1.4.2.3，最终协议升级到 1.4.2.4。
+
+Review follow-up: 1.4.2.5
+- AI watcher refresh now adds approaching peers even while other watchers remain.
+- SCENE_READY carries the actual main-scene ID, so Farm_Main accepts Farm_01 within the same main scene.
+- SpawnTogether timeout starts after local level initialization and allows 30 seconds. Early host anchors are cached until the destination is initialized.
+- Player Buff reconciliation moved out of unordered health messages into PLAYER_BUFF_SNAPSHOT (199). Snapshot, player Buff report and broadcast share ordered channel 0. Local snapshots are throttled to once per 3 seconds; health retains its existing fast path.
+- User-excluded player damage request throttling is byte-for-byte unchanged.
+- Release build succeeded; all 20 scheduling/wire checks passed. No multiplayer game test performed. Host and all clients must use 1.4.2.5.

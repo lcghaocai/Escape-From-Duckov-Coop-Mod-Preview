@@ -94,6 +94,7 @@ public enum Op : byte
     CORPSE_SPAWN_REQUEST = 196,
     SHARED_HOME = 197,
     SCENE_JOIN = 198,
+    PLAYER_BUFF_SNAPSHOT = 199, // Ordered reconciliation alongside player buff deltas.
 
     AI_HEALTH_REPORT = 174,
     AI_HEALTH_BROADCAST = 175,

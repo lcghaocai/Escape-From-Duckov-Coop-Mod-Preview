@@ -27,5 +27,6 @@
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Health/PlayerHealthBroadcastRpc.cs" Link="Production/PlayerHealthBroadcastRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/AIRefreshChunkRpc.cs" Link="Production/AIRefreshChunkRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Main/SceneService/AISnapshotMetadata.cs" Link="Production/AISnapshotMetadata.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Health/PlayerBuffSnapshotRpc.cs" Link="Production/PlayerBuffSnapshotRpc.cs" />
   </ItemGroup>
 </Project>

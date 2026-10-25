@@ -18,7 +18,6 @@ internal static class DirectMessageChannels
                 case Op.AI_BUFF_REPORT:
                 case Op.PLAYER_DAMAGE_REQUEST:
                 case Op.PLAYER_DAMAGE_FORWARD:
-                case Op.PLAYER_BUFF_SELF_APPLY:
                     return Combat;
             }
         }

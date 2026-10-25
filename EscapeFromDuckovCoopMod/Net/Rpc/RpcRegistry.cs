@@ -37,6 +37,7 @@ public static class RpcRegistry
         Register<PlayerDamageRequestRpc>(RPCHealth.HandlePlayerDamageRequest);
         Register<PlayerBuffReportRpc>(RPCHealth.HandlePlayerBuffReport);
         Register<PlayerBuffBroadcastRpc>(RPCHealth.HandlePlayerBuffBroadcast);
+        Register<PlayerBuffSnapshotRpc>(RPCHealth.HandlePlayerBuffSnapshot);
         Register<ChatSendRequestRpc>(RPCChat.HandleChatSend);
         Register<ChatMessageRpc>(RPCChat.HandleChatMessage);
         Register<AudioEventRpc>(RPCAudio.HandleAudioEvent);

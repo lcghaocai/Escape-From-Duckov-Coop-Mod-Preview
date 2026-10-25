@@ -7,6 +7,7 @@ public partial class Buff_
     public void Reset()
     {
         _replayOrder.Clear();
+        _nextLocalSnapshot = 0f;
         CoopTool._cliPendingProxyBuffs.Clear();
     }
 

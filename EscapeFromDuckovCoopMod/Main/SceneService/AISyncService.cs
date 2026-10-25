@@ -454,7 +454,8 @@ public sealed partial class AISyncService
             {
                 watchers = GetServerWatchersInRange(entry, DeactivationRadius);
             }
-            else if (entry.Activated && ShouldRefreshServerWatchers(entry.Id, now))
+            // Existing viewers must not prevent newly approaching peers from subscribing.
+            if (entry.Activated && ShouldRefreshServerWatchers(entry.Id, now))
             {
                 watchers = EnsureServerWatchers(entry);
             }

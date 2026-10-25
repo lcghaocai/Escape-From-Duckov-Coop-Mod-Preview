@@ -139,6 +139,8 @@ public class SceneNet : MonoBehaviour
         {
             if (!_cliHostReadyReceived)
             {
+                if (_cliForceSpawnDeadline <= 0f)
+                    _cliForceSpawnDeadline = Time.unscaledTime + ClientGateTimeoutSeconds;
                 // 主机场景 ID 一直对不上/SCENE_READY 丢失时不能永久卡住：
                 // 超时后退回本地出生点，至少先让角色正常上报。
                 if (Time.unscaledTime < _cliForceSpawnDeadline)
@@ -175,6 +177,8 @@ public class SceneNet : MonoBehaviour
         writer.PutVector3(pos);
         writer.PutQuaternion(rot);
         writer.Put(faceJson);
+        // Active sub-scene names need not share a prefix with the load target.
+        writer.Put(MultiSceneCore.MainSceneID ?? string.Empty);
 
         if (IsServer)
             // 主机广播（本机也等同已就绪，方便让新进来的客户端看到主机）
@@ -454,7 +458,8 @@ public class SceneNet : MonoBehaviour
         sceneLocationName = message.LocationName ?? string.Empty;
 
         _cliForceSpawnAtHost = message.ForceSpawnAtHost && sceneLocationName == "OnPointerClick";
-        _cliForceSpawnDeadline = Time.unscaledTime + 5f;
+        // Start the timeout only once this client has initialized the destination.
+        _cliForceSpawnDeadline = 0f;
         _cliHostReadyReceived = false;
         _cliPendingPostLoadSnap = _cliForceSpawnAtHost;
         _cliHostSpawnPosition = message.HostSpawnPosition;
@@ -484,23 +489,24 @@ public class SceneNet : MonoBehaviour
         localReady = false;
     }
 
-    public void Client_OnRemoteSceneReady(string playerId, string sceneId, Vector3 pos, Quaternion rot)
+    public void Client_OnRemoteSceneReady(string playerId, string sceneId, Vector3 pos, Quaternion rot, string mainSceneId = null)
     {
         if (!_cliForceSpawnAtHost) return;
         if (sceneLocationName != "OnPointerClick") return;
         if (IsBaseScene(sceneId)) return;
-        if (!SceneIdsMatch(sceneTargetId, sceneId))
+        if (!SceneIdsMatch(sceneTargetId, sceneId) && !SceneIdsMatch(sceneTargetId, mainSceneId))
         {
             CoopLogSystem.WriteNetworkDiagnostic(
-                $"[SCENE] SpawnTogether ignored host ready: target='{sceneTargetId}' host='{sceneId}'");
+                $"[SCENE] SpawnTogether ignored host ready: target='{sceneTargetId}' host='{sceneId}' main='{mainSceneId}'");
             return;
-        }        if (_cliHostReadyReceived) return;
+        }
+        if (_cliHostReadyReceived) return;
 
         _cliHostReadyReceived = true;
         _cliHostSpawnPosition = pos;
         _cliHostSpawnRotation = rot;
         CoopLogSystem.WriteNetworkDiagnostic(
-            $"[SCENE] SpawnTogether host ready: target='{sceneTargetId}' host='{sceneId}' pos={pos.x:0.0},{pos.y:0.0},{pos.z:0.0}");
+            $"[SCENE] SpawnTogether host ready: target='{sceneTargetId}' host='{sceneId}' main='{mainSceneId}' pos={pos.x:0.0},{pos.y:0.0},{pos.z:0.0}");
 
         Client_TrySnapToHostAnchor();
     }
@@ -517,6 +523,10 @@ public class SceneNet : MonoBehaviour
 
     private bool Client_TrySnapToHostAnchor(bool markPostLoadApplied = false)
     {
+        // Cache early host READY messages; never teleport the character in the old map.
+        if (!LevelManager.LevelInited ||
+            (!SceneIdsMatch(sceneTargetId, MultiSceneCore.MainSceneID) &&
+             !SceneIdsMatch(sceneTargetId, MultiSceneCore.ActiveSubSceneID))) return false;
         var main = CharacterMainControl.Main;
         var modelRoot = main != null ? main.modelRoot : null;
         var controller = main != null ? main.GetComponent<CharacterController>() : null;

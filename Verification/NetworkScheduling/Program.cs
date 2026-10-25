@@ -12,6 +12,7 @@ static partial class Program
 
     public static void Main()
     {
+        Test("ordered buff snapshots preserve empty/null/populated wire boundaries", BuffSnapshotWire);
         Test("combat lane preserves order, ordinary progress and buffer ownership", CombatFairness);
         Test("AI refresh reuses per-peer metadata and carries live state", CompactRefresh);
         Test("real UDP: combat arrives while bulk fragments are repeatedly lost", CombatThroughFragmentLoss);

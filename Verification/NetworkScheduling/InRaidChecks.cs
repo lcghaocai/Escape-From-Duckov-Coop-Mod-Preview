@@ -3,6 +3,25 @@ using LiteNetLib.Layers;
 
 static partial class Program
 {
+    private static void BuffSnapshotWire()
+    {
+        foreach (var buffs in new PlayerBuffState[][] { null, Array.Empty<PlayerBuffState>(),
+            new[] { new PlayerBuffState { WeaponTypeId = 42, BuffId = 17, Layers = 3 } } })
+        {
+            var writer = new NetDataWriter();
+            new PlayerBuffSnapshotRpc { PlayerId = "owner", Buffs = buffs }.Serialize(writer);
+            var reader = new CoopPacketReader(writer.CopyData(), 0, writer.Length);
+            var message = new PlayerBuffSnapshotRpc(); message.Deserialize(reader);
+            Check(message.PlayerId == "owner" && reader.AvailableBytes == 0, "Buff snapshot boundary");
+            Check((message.Buffs == null) == (buffs == null), "Null snapshot became clear-all");
+            if (buffs != null) Check(message.Buffs.Length == buffs.Length, "Buff count");
+            if (buffs?.Length > 0) Check(message.Buffs[0].WeaponTypeId == 42 &&
+                message.Buffs[0].BuffId == 17 && message.Buffs[0].Layers == 3, "Buff contents");
+        }
+        var methods = typeof(PlayerBuffSnapshotRpc).GetCustomAttributes(typeof(RpcAttribute), false);
+        Check(methods.Length == 1, "Buff snapshot RPC not registered by attribute");
+    }
+
     private static void CombatFairness()
     {
         var freed = new List<int>();
@@ -21,10 +40,11 @@ static partial class Program
         queue.Clear();
         Check(freed.Count == 27 && freed.Distinct().Count() == 27 && queue.Count == 0, "Leaked or double-recycled buffer");
         foreach (var op in new[] { Op.PLAYER_HEALTH_REPORT, Op.PLAYER_DEAD_LOOT_SPAWN, Op.CORPSE_INVENTORY,
-            Op.AI_SPAWN, Op.AI_DESPAWN, Op.AI_BUFF_BROADCAST, Op.AI_SNAPSHOT_CHUNK, Op.AI_REFRESH_CHUNK, Op.SHARED_HOME })
+            Op.AI_SPAWN, Op.AI_DESPAWN, Op.AI_BUFF_BROADCAST, Op.AI_SNAPSHOT_CHUNK, Op.AI_REFRESH_CHUNK, Op.SHARED_HOME,
+            Op.PLAYER_BUFF_SELF_APPLY, Op.HOST_BUFF_PROXY_APPLY, Op.PLAYER_BUFF_SNAPSHOT })
             Check(DirectMessageChannels.Select((byte)op, DeliveryMethod.ReliableOrdered) == 0, "Lifecycle/death ordering moved lanes");
         foreach (var op in new[] { Op.AI_HEALTH_REPORT, Op.AI_BUFF_REPORT, Op.PLAYER_DAMAGE_REQUEST,
-            Op.PLAYER_DAMAGE_FORWARD, Op.PLAYER_BUFF_SELF_APPLY })
+            Op.PLAYER_DAMAGE_FORWARD })
             Check(DirectMessageChannels.Select((byte)op, DeliveryMethod.ReliableOrdered) == 1, "Hit/buff request left behind bulk");
     }
 

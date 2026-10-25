@@ -2,6 +2,37 @@ namespace EscapeFromDuckovCoopMod;
 
 public partial class Buff_
 {
+    private float _nextLocalSnapshot;
+
+    internal void SendLocalSnapshot()
+    {
+        var service = Service;
+        if (service == null || !service.networkStarted || !CharacterMainControl.Main ||
+            Time.unscaledTime < _nextLocalSnapshot) return;
+        _nextLocalSnapshot = Time.unscaledTime + 3f;
+        var message = new PlayerBuffSnapshotRpc
+        {
+            PlayerId = service.GetPlayerId(null),
+            Buffs = CaptureLocal()
+        };
+        CoopTool.SendRpc(in message);
+    }
+
+    internal void HandleSnapshot(RpcContext context, PlayerBuffSnapshotRpc message)
+    {
+        if (message.Buffs == null || Service == null) return;
+        if (context.IsServer)
+        {
+            if (context.Sender == null) return;
+            // Owners may reconcile only their own replica, never a supplied player ID.
+            message.PlayerId = Service.GetPlayerId(context.Sender);
+            if (string.IsNullOrEmpty(message.PlayerId)) return;
+            ReceiveSnapshot(message.PlayerId, message.Buffs);
+            CoopTool.SendRpc(in message, context.Sender);
+        }
+        else ReceiveSnapshot(message.PlayerId, message.Buffs);
+    }
+
     internal static PlayerBuffState[] CaptureLocal() => CharacterMainControl.Main.GetBuffManager().Buffs
         .Where(b => b).Select(b => new PlayerBuffState { WeaponTypeId = b.fromWeaponID, BuffId = b.ID, Layers = b.CurrentLayers }).ToArray();
 
