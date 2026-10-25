@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -51,6 +51,7 @@ namespace EscapeFromDuckovCoopMod;
     }
 
     private readonly Dictionary<Inventory, int> _cliVersions = new(new InventoryRefEq());
+    private readonly Dictionary<Inventory, int> _cliSnapshotSignatures = new(new InventoryRefEq());
     private readonly Dictionary<Inventory, int> _srvVersions = new(new InventoryRefEq());
     private readonly Dictionary<Inventory, HashSet<NetPeer>> _srvViewers = new(new InventoryRefEq());
     private readonly HashSet<Inventory> _srvHookedInventories = new(new InventoryRefEq());
@@ -94,6 +95,7 @@ namespace EscapeFromDuckovCoopMod;
         _cliPendingPut.Clear();
         _cliPutReceipts.Clear();
         _cliInitializedLoot.Clear();
+        _cliSnapshotSignatures.Clear();
         _cliSwapByVictim.Clear();
         _cliActiveLoot.Clear();
         _srvPlayerPlaced.Clear();
@@ -499,6 +501,9 @@ namespace EscapeFromDuckovCoopMod;
     {
         if (!IsServer || inv == null) return;
         if (_serverApplyingLoot) return;
+        // 共享仓库整理时会连续触发每个槽位的 onContentChanged；
+        // 这里先压住，等 EndSort 统一发一份全量状态，避免 N 次 UI 重绘/广播。
+        if (SharedHomeStorage.Sorting) return;
 
         if (!LootboxDetectUtil.TryResolveLootOwner(inv, out var lootInv, out var ownerSlot, out var master))
             return;
@@ -565,6 +570,7 @@ namespace EscapeFromDuckovCoopMod;
     {
         if (!IsServer || slot == null) return;
         if (_serverApplyingLoot) return;
+        if (SharedHomeStorage.Sorting) return;
 
         var master = slot.Master;
         var inv = master ? master.InInventory : null;
@@ -685,6 +691,27 @@ namespace EscapeFromDuckovCoopMod;
         }
     }
 
+    private static int ComputeLootSnapshotSignature(LootStateRpc rpc)
+    {
+        unchecked
+        {
+            var hash = 17;
+            hash = hash * 31 + rpc.Capacity;
+            var count = rpc.Snapshot?.Length ?? 0;
+            hash = hash * 31 + count;
+            for (var i = 0; i < count; i++)
+            {
+                var slot = rpc.Snapshot[i];
+                hash = hash * 31 + (slot.HasItem ? 1 : 0);
+                hash = hash * 31 + slot.TypeId;
+                hash = hash * 31 + slot.Stack;
+                if (slot.HasItem)
+                    hash = hash * 31 + ItemTool.ComputeSnapshotHash(slot.Item);
+            }
+            return hash;
+        }
+    }
+
     public void Client_ApplyLootboxState(LootStateRpc rpc)
     {
         if (rpc.Id.LootUid == SharedHomeStorage.LootUid && !SharedHomeSave.OverlayActive) return;
@@ -693,6 +720,19 @@ namespace EscapeFromDuckovCoopMod;
 
         var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
         if (!inv || LootboxDetectUtil.IsPrivateInventory(inv)) return;
+
+        // 单点“更新”/整理后经常会收到内容完全相同的全量快照。
+        // 旧逻辑会把每个槽位重新 Remove/Add 一遍，触发多次 UI 重绘；
+        // 这里先比内容签名，没变化就直接跳过。
+        if (rpc.IsSnapshot)
+        {
+            var signature = ComputeLootSnapshotSignature(rpc);
+            var mustInitialize = !_cliInitializedLoot.Contains(inv);
+            if (!mustInitialize && _cliSnapshotSignatures.TryGetValue(inv, out var previousSignature) &&
+                previousSignature == signature)
+                return;
+            _cliSnapshotSignatures[inv] = signature;
+        }
 
         Client_ForceSearchMode(inv);
 
