@@ -12,6 +12,10 @@ static partial class Program
 
     public static void Main()
     {
+        Test("receive diagnostics retain ownership and age across coalescing/reset", ReceiveDiagnostics);
+        Test("per-peer pressure isolates clients and restores quality after recovery/timeout", PressureRecovery);
+        Test("entity recovery limits burst, repeated IDs and reconnect state", RecoveryRateLimit);
+        Test("pressure and single-entity request wire boundaries round-trip", RecoveryWire);
         Test("ordered buff snapshots preserve empty/null/populated wire boundaries", BuffSnapshotWire);
         Test("combat lane preserves order, ordinary progress and buffer ownership", CombatFairness);
         Test("AI refresh reuses per-peer metadata and carries live state", CompactRefresh);
@@ -405,6 +409,8 @@ static partial class Program
             Thread.Sleep(100); // Accumulate a burst before the first host dispatch.
             PollAll();
             Check(handled > 0 && handled <= 2, "Reliable burst was drained in a single frame");
+            var backlog = host.GetReceiveQueueSnapshot();
+            Check(backlog.Supported && backlog.Count > 0 && backlog.OldestWaitMs > 0, "Transport feedback missed deferred native readers");
             Until(() => handled == 280, PollAll, "Reliable burst failed to drain");
             Check(delivered.Count == 7 && delivered.Values.All(v => v.SequenceEqual(Enumerable.Range(0, 40))), "Reliable messages lost/reordered across deferred frames");
             foreach (var client in clients)
@@ -423,6 +429,8 @@ static partial class Program
             Check(UnityEngine.Debug.Errors.Count(e => e.Contains("expected test handler failure")) == 1, "Handler exception was not contained");
             Console.WriteLine($"  7 real UDP clients: 280/280 reliable messages in order; {poseCallbacks} pose callbacks for 1414 samples, all 14 entities current.");
             host.Stop(); host.PollEvents();
+            var cleared = host.GetReceiveQueueSnapshot();
+            Check(cleared.Count == 0 && cleared.CombatCount == 0 && cleared.OldestWaitMs == 0, "Stopped transport retained pressure feedback");
         }
         finally
         {

@@ -227,6 +227,7 @@ public sealed partial class AISyncService
     public void Reset()
     {
         AiQuestCredit.Reset();
+        ResetReceivePressure();
         _serverSnapshotChunks.Clear();
         _serverSnapshotRequests.Clear();
         _serverSnapshotMetadata.Clear();
@@ -520,6 +521,7 @@ public sealed partial class AISyncService
         }
 
         Server_FlushPendingHealth(now);
+        Server_FlushEntityRecoveries();
         Server_FlushSnapshotChunks();
 
         if (now >= _nextServerRescanTime)
@@ -542,6 +544,7 @@ public sealed partial class AISyncService
     {
         if (!IsServer || context.Sender == null) return;
         if (CheckAndHandleSyncBlock()) return;
+        if (message.EntityId > 0) { Server_QueueEntityRecovery(context.Sender, message); return; }
         var scene = Service.playerStatuses.TryGetValue(context.Sender, out var status) ? status.SceneId : null;
         var now = Time.unscaledTime;
         if (_serverSnapshotChunks.Contains(context.Sender))
@@ -550,6 +553,7 @@ public sealed partial class AISyncService
             if (_serverSnapshotRequests.TryGetValue(context.Sender, out var pending) &&
                 pending.Scene == scene && now - pending.Time < 1f) return;
             _serverSnapshotChunks.Remove(context.Sender);
+            _essentialSnapshots.Remove(context.Sender);
         }
         var fullTime = !message.VehiclesOnly ? now :
             _serverSnapshotRequests.TryGetValue(context.Sender, out var previous) && previous.Scene == scene
@@ -620,6 +624,10 @@ public sealed partial class AISyncService
         if (!IsServer || peer == null) return;
         _serverSnapshotChunks.Remove(peer);
         _serverSnapshotRequests.Remove(peer);
+        _receivePressure.Remove(peer);
+        _serverEntityRecoveryLimiters.Remove(peer);
+        _serverEntityRecoveries.Remove(peer);
+        _essentialSnapshots.Remove(peer);
         _serverSnapshotMetadata.Remove(peer);
 
         foreach (var watchers in _serverWatchers.Values)
@@ -711,6 +719,7 @@ public sealed partial class AISyncService
                 _pendingSnapshotQueue.Dequeue();
                 _droppedSnapshotCount++;
             }
+            if (!snap.MetadataOmitted) Client_TrackMetadata(snap.Id);
             var orderedSnapshot = snap;
             orderedSnapshot.MetadataReceiveOrder = _clientSnapshotMetadata.Receive();
             orderedSnapshot.HealthReceiveOrder = _clientHealthOrder.Receive();
@@ -721,7 +730,7 @@ public sealed partial class AISyncService
         if (_droppedSnapshotCount >= SnapshotDropResyncThreshold)
         {
             _droppedSnapshotCount = 0;
-            Client_TryScheduleSnapshotRecovery(true);
+            Client_TryScheduleSnapshotRecovery(false);
         }
     }
 
@@ -758,6 +767,7 @@ public sealed partial class AISyncService
         if (!IsClientEntryInRange(in message.Entry, GetClientSnapshotRange(message.Entry.IsVehicle)) && !HasNativeArea(message.Entry.CharacterPresetKey))
             return;
 
+        Client_TrackMetadata(message.Entry.Id);
         var entry = CoopSyncDatabase.AI.GetOrCreate(message.Entry.Id);
         var snapshot = message.Entry;
         snapshot.HealthReceiveOrder = _clientHealthOrder.Receive();
@@ -791,7 +801,10 @@ public sealed partial class AISyncService
         if (IsServer) return;
         if (CheckAndHandleSyncBlock()) return;
         if (!CoopSyncDatabase.AI.TryGet(message.Id, out var entry) || entry == null)
+        {
+            if (IsClientWithinRange(message.Position, DeactivationRadius)) Client_RequestEntityRecovery(message.Id);
             return;
+        }
 
         if ((!entry.IsVehicle && message.Timestamp <= entry.LastKnownRemoteTime) ||
             (_latestPendingStateById.TryGetValue(message.Id, out var pending) && message.Timestamp <= pending.Timestamp))
@@ -834,6 +847,7 @@ public sealed partial class AISyncService
         if (IsServer || Service == null || !Service.networkStarted) return;
         if (CheckAndHandleSyncBlock()) return;
 
+        Client_ReportReceivePressure();
         Client_RequestSnapshotIfNeeded();
         Client_ProcessPendingSnapshots();
         Client_ProcessPendingStateUpdates();
@@ -982,7 +996,7 @@ public sealed partial class AISyncService
 
         if (!HasReplicaSpawnMetadata(entry))
         {
-            Client_DeferReplicaSpawn(entry, true);
+            Client_DeferReplicaSpawn(entry);
             return;
         }
 
@@ -1100,6 +1114,7 @@ public sealed partial class AISyncService
         _clientPendingBuffs.Remove(id);
         _clientReplicaRecoveryTimes.Remove(id);
         _clientNextMissingModelWarning.Remove(id);
+        _clientMetadataReceivedAt.Remove(id);
 
     }
 
@@ -1132,7 +1147,7 @@ public sealed partial class AISyncService
                 {
                     // Includes changed metadata discarded by range/budget checks.
                     // Older queued refreshes must not undo a newer full spawn.
-                    if (known == null || needsRecovery) Client_TryScheduleSnapshotRecovery(true);
+                    if (known == null || needsRecovery) Client_RequestEntityRecovery(snap.Id);
                     processed++;
                     continue;
                 }
@@ -1182,7 +1197,7 @@ public sealed partial class AISyncService
     {
         if (!CoopSyncDatabase.AI.TryGet(message.Id, out var entry) || entry == null)
         {
-            Client_TryScheduleSnapshotRecovery(true);
+            Client_RequestEntityRecovery(message.Id);
             return;
         }
         if (entry.Status == AIStatus.Dead) return;
@@ -1234,7 +1249,7 @@ public sealed partial class AISyncService
         if (!CoopSyncDatabase.AI.TryGet(message.Id, out var entry) || entry == null)
         {
             CacheClientPendingBuff(message.Id, message.WeaponTypeId, message.BuffId, message.Layers, !message.Removed);
-            Client_TryScheduleSnapshotRecovery(true);
+            Client_RequestEntityRecovery(message.Id);
             return;
         }
 
@@ -1252,24 +1267,8 @@ public sealed partial class AISyncService
         {
             CacheClientPendingBuff(message.Id, message.WeaponTypeId, message.BuffId, message.Layers, !message.Removed);
 
-            if (entry != null)
-            {
-                var now = Time.unscaledTime;
-                _clientRequested.TryGetValue(message.Id, out var nextRetry);
-                if (now >= nextRetry)
-                {
-                    var request = new AIActivationRequestRpc
-                    {
-                        Id = message.Id,
-                        Force = true
-                    };
-                    CoopTool.SendRpc(in request);
-                    _clientRequested[message.Id] = now + ActivationRetryInterval;
-                }
-
-                if (entry.Activated || entry.Status == AIStatus.Active)
-                    Client_TryScheduleSnapshotRecovery(false);
-            }
+            Client_EnsureReplica(entry);
+            if (string.IsNullOrEmpty(entry.ModelName)) Client_RequestEntityRecovery(message.Id);
         }
     }
 
@@ -1282,7 +1281,7 @@ public sealed partial class AISyncService
 
         if (!CoopSyncDatabase.AI.TryGet(message.VehicleId, out var entry) || entry == null)
         {
-            Client_TryScheduleSnapshotRecovery(true);
+            Client_RequestEntityRecovery(message.VehicleId);
             return;
         }
 
@@ -1546,6 +1545,7 @@ public sealed partial class AISyncService
 
         if (!IsServer)
         {
+            Client_LogQueueDiagnostics();
             CoopPerfLog.AppendEvent(
                 "ai-client",
                 $"spawnQueue={_clientReplicaSpawnQueue.Count} spawning={_clientReplicaSpawning.Count} vehicleReplicas={CountClientVehicleReplicas()}");
@@ -1583,13 +1583,13 @@ public sealed partial class AISyncService
         _nextSnapshotRefreshTime = now + SnapshotRefreshInterval;
     }
 
-    private void Client_DeferReplicaSpawn(AISyncEntry entry, bool forceFull)
+    private void Client_DeferReplicaSpawn(AISyncEntry entry)
     {
         if (entry == null)
             return;
 
         _clientReplicaRecoveryTimes[entry.Id] = Time.unscaledTime + Mathf.Max(0.25f, ActivationRetryInterval);
-        Client_TryScheduleSnapshotRecovery(forceFull);
+        Client_RequestEntityRecovery(entry.Id);
     }
 
     private void BroadcastSpawn(AISyncEntry entry, HashSet<NetPeer> targets)
@@ -2081,9 +2081,8 @@ public sealed partial class AISyncService
         };
 
         var signature = ComputeStateSignature(in message);
-        // An idle area's last unreliable pose may be lost; periodically resend its current anchor.
-        if (HasNativeArea(entry.CharacterPresetKey))
-            signature = HashCode.Combine(signature, Mathf.FloorToInt(Time.unscaledTime / Mathf.Max(1f, IdleStateRecordInterval)));
+        // A throttled/lost final pose still needs to converge once an actor stops moving.
+        signature = HashCode.Combine(signature, Mathf.FloorToInt(Time.unscaledTime));
         if (_lastStateSignatures.TryGetValue(entry.Id, out var lastState) && lastState == signature)
             return;
         _lastStateSignatures[entry.Id] = signature;
@@ -2099,6 +2098,7 @@ public sealed partial class AISyncService
                 if (peer != null && peer.ConnectionState == ConnectionState.Connected &&
                     (watchersAlreadyFiltered || IsPeerWithinRange(peer, anchor, DeactivationRadius) || HasNativeArea(entry.CharacterPresetKey)))
                 {
+                    if (!Server_AllowPose(peer, entry, watchersAlreadyFiltered)) continue;
                     peer.Send(writer, descriptor.Delivery);
                     sent++;
                 }
@@ -2295,7 +2295,7 @@ public sealed partial class AISyncService
         return null;
     }
 
-    private void Server_SendSnapshotChunk(NetPeer peer, List<AISnapshotEntry> buffer, bool reset)
+    private void Server_SendSnapshotChunk(NetPeer peer, List<AISnapshotEntry> buffer, bool reset, bool forceMetadata = false)
     {
         if (!IsServer || peer == null || buffer == null) return;
         var full = new List<AISnapshotEntry>(buffer.Count);
@@ -2304,7 +2304,7 @@ public sealed partial class AISyncService
         foreach (var snapshot in buffer)
         {
             var signature = snapshot.MetadataVersion;
-            if (!reset && _serverSnapshotMetadata.Matches(peer, snapshot.Id, signature))
+            if (!reset && !forceMetadata && _serverSnapshotMetadata.Matches(peer, snapshot.Id, signature))
                 refresh.Add(snapshot);
             else
             {
@@ -2677,6 +2677,7 @@ public sealed partial class AISyncService
 
     private async UniTaskVoid SpawnReplicaAsync(AISyncEntry entry)
     {
+        var buildStart = SnapshotTime();
         var spawnId = entry?.Id ?? 0;
         var generation = _clientReplicaSpawnGeneration;
         GameObject instance = null;
@@ -2706,7 +2707,7 @@ public sealed partial class AISyncService
             if (!prefab)
             {
                 LogMissingModelPrefab(entry);
-                Client_DeferReplicaSpawn(entry, true);
+                Client_DeferReplicaSpawn(entry);
                 return;
             }
 
@@ -2831,6 +2832,7 @@ public sealed partial class AISyncService
             FlushClientPendingBuffs(entry.Id, replica);
             cmc.gameObject.SetActive(false);
             cmc.gameObject.SetActive(true);
+            Client_RecordVisible(entry.Id, buildStart);
             // Show and synchronize the actor before optional equipment finishes loading.
             // Retain the spawn concurrency limit while loading gear to bound asset work.
             await ApplyEquipmentAsync(cmc.characterModel, new Dictionary<string, int>(entry.Equipment),

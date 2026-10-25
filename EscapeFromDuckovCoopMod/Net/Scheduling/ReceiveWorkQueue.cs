@@ -14,6 +14,7 @@ internal sealed class ReceiveWorkQueue<TKey, TPacket>
     public long CoalescedCount => _normal.CoalescedCount;
     public void Enqueue(TPacket packet, bool combat = false) => (combat ? _combat : _normal).Enqueue(packet);
     public void EnqueueLatest(TKey key, TPacket packet, double order = double.NaN) => _normal.EnqueueLatest(key, packet, order);
+    public double OldestTime(Func<TPacket, double> time) => Math.Min(_normal.OldestTime(time), _combat.OldestTime(time));
     public bool TryDequeue(out TPacket packet)
     {
         if (_combat.Count > 0 && (_normal.Count == 0 || _combatBurst < 3))

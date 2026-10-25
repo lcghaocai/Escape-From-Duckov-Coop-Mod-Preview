@@ -43,6 +43,8 @@ internal sealed class OrderedPacketQueue<TKey, TPacket>
         _latest[key] = _packets.AddLast(new Entry(packet, true, key, order));
     }
 
+    public double OldestTime(Func<TPacket, double> time) => _packets.First == null ? double.PositiveInfinity : time(_packets.First.Value.Packet);
+
     public bool TryDequeue(out TPacket packet)
     {
         var first = _packets.First;

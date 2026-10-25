@@ -27,6 +27,7 @@ public abstract class CoopNetworkManager
     public abstract void Stop();
     public abstract void PollEvents();
     public virtual int GetReliableQueueLength(CoopPeer peer) => -1;
+    public virtual ReceiveQueueSnapshot GetReceiveQueueSnapshot() => default;
     public virtual void TriggerUpdate() { }
     public virtual void Connect(string address, int port, NetDataWriter data) => throw new NotSupportedException();
     public virtual void SendUnconnectedMessage(NetDataWriter data, IPEndPoint endpoint) { }

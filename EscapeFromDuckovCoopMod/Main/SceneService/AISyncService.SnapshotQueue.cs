@@ -15,7 +15,7 @@ public sealed partial class AISyncService
     private void QueueSnapshotIds(NetPeer peer, int[] ids, bool reset)
     {
         if (!IsServer || peer == null) return;
-        if (reset) _serverSnapshotMetadata.Remove(peer);
+        if (reset) { _serverSnapshotMetadata.Remove(peer); _essentialSnapshots.Add(peer); }
         if (!_serverSnapshotChunks.TryGet(peer, out var chunks))
         {
             chunks = new();
@@ -28,7 +28,8 @@ public sealed partial class AISyncService
     {
         _serverSnapshotChunks.Tick(
             peer => peer.ConnectionState == ConnectionState.Connected,
-            peer => Service.netManager.GetReliableQueueLength(peer) >= 16,
+            peer => Service.netManager.GetReliableQueueLength(peer) >= 16 ||
+                (!_essentialSnapshots.Contains(peer) && !_receivePressure.AllowPeriodicSnapshot(peer, Time.unscaledTimeAsDouble)),
             (peer, chunks) =>
             {
                 if (chunks.Count == 0) return true;
@@ -38,6 +39,7 @@ public sealed partial class AISyncService
                     if (CoopSyncDatabase.AI.TryGet(id, out var entry)) entries.Add(BuildSnapshotEntry(entry));
                 // Sample health/buffs/pose only when sending, after live health events.
                 Server_SendSnapshotChunk(peer, entries, chunk.Reset);
+                if (chunks.Count == 0) _essentialSnapshots.Remove(peer);
                 return chunks.Count == 0;
             }, SnapshotTime, 0.002);
     }

@@ -12,8 +12,10 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
     private readonly LiteNetLib.NetManager _manager;
     private readonly Dictionary<LiteNetLib.NetPeer, LiteNetPeer> _peers = new();
     private readonly List<CoopPeer> _connected = new();
-    private readonly ReceiveWorkQueue<(CoopPeer Peer, byte Channel, byte Op, string Player, int Ai), PendingPacket> _received
-        = new(packet => packet.Reader.Recycle());
+    private readonly ReceiveWorkQueue<(CoopPeer Peer, byte Channel, byte Op, string Player, int Ai), PendingPacket> _received;
+    private readonly ReceiveQueueDiagnostics _receiveDiagnostics = new();
+    private int _receiveGeneration;
+    private double _nativePollMaxMs;
     private readonly Func<double> _now;
     private double _nextErrorAt;
     private double _nextBacklogReportAt;
@@ -25,13 +27,21 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         public readonly LiteNetLib.NetPacketReader Reader;
         public readonly byte Channel;
         public readonly DeliveryMethod Delivery;
-        public PendingPacket(LiteNetPeer peer, LiteNetLib.NetPacketReader reader, byte channel, DeliveryMethod delivery)
-        { Peer = peer; Reader = reader; Channel = channel; Delivery = delivery; }
+        public readonly byte OpCode;
+        public readonly int Bytes, Generation;
+        public readonly double QueuedAt;
+        public PendingPacket(LiteNetPeer peer, LiteNetLib.NetPacketReader reader, byte channel, DeliveryMethod delivery, double now, int generation)
+        {
+            Peer = peer; Reader = reader; Channel = channel; Delivery = delivery;
+            Bytes = reader.AvailableBytes; OpCode = Bytes > 0 ? reader.RawData[reader.Position] : (byte)0;
+            QueuedAt = now; Generation = generation;
+        }
     }
 
     public LiteNetTransport(ICoopNetworkListener listener, Func<double> now = null, LiteNetLib.Layers.PacketLayerBase packetLayer = null) : base(listener)
     {
         _now = now ?? (() => (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency);
+        _received = new(ReleasePending);
         _manager = new LiteNetLib.NetManager(this, packetLayer)
         {
             BroadcastReceiveEnabled = true,
@@ -52,6 +62,9 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
     {
         _manager.Stop();
         _received.Clear();
+        _receiveGeneration++;
+        _receiveDiagnostics.Clear();
+        _nativePollMaxMs = 0;
         _peers.Clear();
         _connected.Clear();
         _nextErrorAt = _nextBacklogReportAt = 0;
@@ -62,11 +75,14 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         var deadline = _now() + ReceiveBudgetSeconds;
         // Native polling only queues payloads. Expensive Unity/RPC work below has
         // the same four millisecond budget used by the Steam transport.
+        var pollStart = _now();
         _manager.PollEvents();
+        _nativePollMaxMs = Math.Max(_nativePollMaxMs, (_now() - pollStart) * 1000);
         for (var i = 0; IsRunning && i < MaxPacketsPerPoll; i++)
         {
             if (i > 0 && _now() >= deadline) break;
             if (!_received.TryDequeue(out var packet)) break;
+            var handlerStart = _now();
             try
             {
                 if (packet.Peer.ConnectionState == ConnectionState.Connected)
@@ -75,14 +91,29 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
                         packet.Channel, packet.Delivery);
             }
             catch (Exception ex) { Debug.LogError($"[Direct] Receive failed: {ex}"); }
-            finally { packet.Reader.Recycle(); }
+            finally
+            {
+                if (packet.Generation == _receiveGeneration)
+                    _receiveDiagnostics.Handled(packet.OpCode, Math.Max(0, handlerStart - packet.QueuedAt) * 1000, Math.Max(0, _now() - handlerStart) * 1000);
+                ReleasePending(packet);
+            }
         }
-        if (_received.Count > 0 && _now() >= _nextBacklogReportAt)
+        if ((_received.Count > 0 || _receiveDiagnostics.HasActivity) && _now() >= _nextBacklogReportAt)
         {
             _nextBacklogReportAt = _now() + 5;
-            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={_received.Count} combat={_received.CombatCount} coalescedStates={_received.CoalescedCount} budgetMs=4");
+            var snapshot = GetReceiveQueueSnapshot();
+            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={snapshot.Count} combat={snapshot.CombatCount} oldestMs={snapshot.OldestWaitMs:0.0} coalescedStates={_received.CoalescedCount} budgetMs=4 pollMaxMs={_nativePollMaxMs:0.0} ops=[{_receiveDiagnostics.Summary()}]");
+            _receiveDiagnostics.ResetWindow();
+            _nativePollMaxMs = 0;
         }
     }
+    private void ReleasePending(PendingPacket packet)
+    {
+        if (packet.Generation == _receiveGeneration) _receiveDiagnostics.Release(packet.OpCode, packet.Bytes);
+        packet.Reader.Recycle();
+    }
+    public override ReceiveQueueSnapshot GetReceiveQueueSnapshot() => new(_received.Count, _received.CombatCount,
+        _received.Count == 0 ? 0 : Math.Max(0, _now() - _received.OldestTime(p => p.QueuedAt)) * 1000);
     public override int GetReliableQueueLength(CoopPeer peer) => peer is LiteNetPeer direct ? direct.ReliableQueueLength : -1;
     public override void TriggerUpdate() => _manager.TriggerUpdate();
     public override void Connect(string address, int port, NetDataWriter data) => _manager.Connect(address, port, data);
@@ -108,7 +139,8 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
     public void OnNetworkReceive(LiteNetLib.NetPeer peer, LiteNetLib.NetPacketReader reader, byte channel, DeliveryMethod delivery)
     {
         if (!_peers.TryGetValue(peer, out var wrapper)) { reader.Recycle(); return; }
-        var packet = new PendingPacket(wrapper, reader, channel, delivery);
+        var packet = new PendingPacket(wrapper, reader, channel, delivery, _now(), _receiveGeneration);
+        _receiveDiagnostics.Enqueue(packet.OpCode, packet.Bytes);
         // Coalesce only replaceable state, never shots, damage, spawns, inventory
         // operations or snapshots. The peer AND entity are part of the key.
         if (delivery == DeliveryMethod.Unreliable || delivery == DeliveryMethod.Sequenced)
@@ -126,6 +158,13 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
                         ? BitConverter.ToDouble(reader.RawData, keyReader.Position + 28) : double.NaN;
                     if (double.IsInfinity(order)) order = double.NaN;
                     _received.EnqueueLatest((wrapper, channel, op, player, 0), packet, order);
+                    return;
+                }
+                if (op == (byte)Op.RECEIVE_PRESSURE && keyReader.AvailableBytes >= 16)
+                {
+                    var sourceTime = keyReader.GetDouble();
+                    if (double.IsInfinity(sourceTime)) sourceTime = double.NaN;
+                    _received.EnqueueLatest((wrapper, channel, op, null, 0), packet, sourceTime);
                     return;
                 }
                 if (op == (byte)Op.AI_STATE_UPDATE)

@@ -22,7 +22,7 @@ public sealed partial class AISyncService
                 _clientPendingHealth[message.Id] = pending = new();
             pending.Add(message, order, message.Timestamp,
                 message.ConfirmedDamage > 0f || message.KillerCredit || message.AssistCredit);
-            Client_TryScheduleSnapshotRecovery(true);
+            Client_RequestEntityRecovery(message.Id);
             return;
         }
         // Hit feedback and quest credit are events, not replaceable health state.

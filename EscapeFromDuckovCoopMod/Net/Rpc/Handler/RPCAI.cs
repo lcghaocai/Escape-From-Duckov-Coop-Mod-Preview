@@ -2,6 +2,11 @@ namespace EscapeFromDuckovCoopMod;
 
 public static class RPCAI
 {
+    public static void HandleReceivePressure(RpcContext context, ReceivePressureRpc message)
+    {
+        if (context.IsServer) COOPManager.AI?.Server_HandleReceivePressure(context, message);
+    }
+
     public static void HandleSnapshotRequest(RpcContext context, AISnapshotRequestRpc message)
     {
         if (!context.IsServer) return;
