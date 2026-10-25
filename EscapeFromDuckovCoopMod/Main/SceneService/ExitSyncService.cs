@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -347,6 +347,11 @@ public class ExitSyncService
 
     public void Reset()
     {
+        // 客机克隆出来的撤离点/图标会挂在 MultiSceneCore 主场景下，
+        // 不在当前子场景卸载时自动销毁。这里必须主动清理，否则每切一次图都会
+        // 多留一批图标和引用，导致后面场景卸载越来越慢（UnloadTime 飙到几十秒）。
+        Client_ClearSpawned();
+
         _serverSnapshot.Clear();
         _serverPendingPeers.Clear();
         _serverHasSnapshot = false;
@@ -357,14 +362,6 @@ public class ExitSyncService
         _clientSceneId = null;
         _clientSynced = false;
         _clientNextRequestTime = 0f;
-
-        //for (var i = 0; i < _clientSpawnedExits.Count; i++)
-        //    if (_clientSpawnedExits[i]) Object.Destroy(_clientSpawnedExits[i]);
-        //_clientSpawnedExits.Clear();
-
-        //for (var i = 0; i < _clientSpawnedIcons.Count; i++)
-        //    if (_clientSpawnedIcons[i]) Object.Destroy(_clientSpawnedIcons[i]);
-        //_clientSpawnedIcons.Clear();
 
         _clientCreator = null;
         _clientTemplate = default;
