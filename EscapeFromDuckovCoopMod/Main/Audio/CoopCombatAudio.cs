@@ -7,6 +7,7 @@ namespace EscapeFromDuckovCoopMod;
 internal static class CoopCombatAudio
 {
     internal const string FlybyEvent = "SFX/Combat/Bullet/flyby";
+    private static readonly Dictionary<string, float> AudibleRanges = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, bool> GunshotOneShots = new(StringComparer.OrdinalIgnoreCase);
 
     private static bool IsGunshot(CoopAudioEventPayload payload)
@@ -15,9 +16,10 @@ internal static class CoopCombatAudio
             payload.EventName != null && payload.EventName.StartsWith("SFX/Combat/Gun/Shoot/", StringComparison.OrdinalIgnoreCase);
     }
 
-    internal static bool IsTransientGunshot(CoopAudioEventPayload payload)
+    internal static bool IsTransientOneShot(CoopAudioEventPayload payload)
     {
-        if (!IsGunshot(payload)) return false;
+        if (payload.Kind != CoopAudioEventKind.ThreeD || payload.HasSwitch || payload.HasSoundKey ||
+            payload.HasKazooPitch || string.IsNullOrEmpty(payload.EventName)) return false;
         if (GunshotOneShots.TryGetValue(payload.EventName, out var oneShot)) return oneShot;
         if (!AudioManager.TryCreateEventInstance(payload.EventName, out var sound)) return false;
         try
@@ -25,6 +27,8 @@ internal static class CoopCombatAudio
             if (sound.getDescription(out var description) != RESULT.OK || description.isOneshot(out oneShot) != RESULT.OK)
                 return false;
             GunshotOneShots[payload.EventName] = oneShot;
+            if (oneShot && description.getMinMaxDistance(out _, out var maxDistance) == RESULT.OK && maxDistance > 0)
+                AudibleRanges[payload.EventName] = maxDistance;
             return oneShot;
         }
         finally
@@ -32,6 +36,9 @@ internal static class CoopCombatAudio
             sound.release();
         }
     }
+
+    internal static float AudibleRange(CoopAudioEventPayload payload) =>
+        IsTransientOneShot(payload) && AudibleRanges.TryGetValue(payload.EventName, out var range) ? range + 15f : float.PositiveInfinity;
 
     internal static bool TryPlayGunshot(CoopAudioEventPayload payload)
     {

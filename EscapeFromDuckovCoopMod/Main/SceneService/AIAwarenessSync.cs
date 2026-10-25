@@ -195,7 +195,7 @@ public static class AIAwarenessSync
             SourceAiId = sourceAiId
         };
 
-        CoopTool.SendRpc(in rpc);
+        CoopTransientAudio.Send(in rpc);
     }
 
     public static void TrySendVoice(AICharacterController controller, CharacterMainControl cmc, PostSound.VoiceSounds voiceSound)
@@ -227,6 +227,7 @@ public static class AIAwarenessSync
 
     public static void Client_HandleSound(AISoundEventRpc message)
     {
+        if (!CoopTransientAudio.AudibleLocally(message.Position, message.Radius + 15f)) return;
         using (new SoundScope())
         {
             var source = message.SourceAiId != 0 ? COOPManager.AI?.TryGetCharacter(message.SourceAiId) : null;

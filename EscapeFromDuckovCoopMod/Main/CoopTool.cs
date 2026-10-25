@@ -230,7 +230,7 @@ public static class CoopTool
         }
     }
 
-    internal static void SendRpcToPeers<T>(IEnumerable<NetPeer> targets, in T message)
+    internal static void SendRpcToPeers<T>(IEnumerable<NetPeer> targets, in T message, DeliveryMethod? delivery = null)
         where T : struct, IRpcMessage
     {
         if (Service?.IsServer != true) return;
@@ -244,7 +244,7 @@ public static class CoopTool
             foreach (var target in targets)
             {
                 if (target == null || target.ConnectionState != ConnectionState.Connected) continue;
-                target.Send(writer, descriptor.Delivery);
+                target.Send(writer, delivery ?? descriptor.Delivery);
                 NetDiagnostics.Instance.RecordOutbound(descriptor.Op, Math.Max(0, writer.Length - 1));
             }
         }

@@ -29,7 +29,7 @@ using UnityEngine.SceneManagement;
 
 namespace EscapeFromDuckovCoopMod;
 
-    public class LootNet
+    public partial class LootNet
     {
     public readonly Dictionary<uint, Item> _cliPendingPut = new();
     public readonly Dictionary<Item, (Item newItem, Inventory destInv, int destPos, Slot destSlot)> _cliSwapByVictim = new();
@@ -94,7 +94,7 @@ namespace EscapeFromDuckovCoopMod;
         CorpseRecovery.ResetNetwork();
         _applyingLootState = false;
         _serverApplyingLoot = false;
-        _nextLootToken = 1;
+        // Take tokens/receipts survive scene unloads; never reuse a live token.
 
         _cliPendingPut.Clear();
         _cliPutReceipts.Clear();
@@ -275,6 +275,7 @@ namespace EscapeFromDuckovCoopMod;
 
     internal void Tick()
     {
+        TickTakes();
         if (IsServer) Server_FlushWarehouseChanges();
         else if (_cliVersions.HasPendingRequests)
         {
@@ -1029,23 +1030,9 @@ namespace EscapeFromDuckovCoopMod;
 
     public uint Client_SendLootTakeRequest(Inventory lootInv, int position, Inventory destInv, int destPos, Slot destSlot)
     {
-        var lm = LootManagerInstance;
-        if (IsServer || lootInv == null || connectedPeer == null || lm == null) return 0;
-        if (LootboxDetectUtil.IsPrivateInventory(lootInv)) return 0;
-
-        var token = _nextLootToken++;
-
-        var rpc = new LootTakeRequestRpc
-        {
-            Id = lm.BuildLootIdentifier(lootInv),
-            Token = token,
-            Position = position,
-            PreferDest = destPos
-        };
-
-        CoopTool.SendRpc(in rpc);
-
-        return token;
+        var item = lootInv ? lootInv.GetItemAt(position) : null;
+        RequestTake(item, destInv, destPos, destSlot);
+        return _takes.FirstOrDefault(p => p.Value.Source == item).Key;
     }
 
     public void Server_HandleLootPutRequest(RpcContext context, LootPutRequestRpc rpc)
@@ -1167,52 +1154,6 @@ namespace EscapeFromDuckovCoopMod;
         }
     }
 
-    public void Server_HandleLootTakeRequest(RpcContext context, LootTakeRequestRpc rpc)
-    {
-        var lm = LootManagerInstance;
-        var peer = context.Sender;
-        if (!context.IsServer || peer == null || lm == null) return;
-
-        var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
-        if (!LootboxDetectUtil.IsLootboxInventory(inv) || inv == null)
-        {
-            Server_SendLootDeny(peer, "no_inv");
-            return;
-        }
-
-        _serverApplyingLoot = true;
-        try
-        {
-            var item = inv.GetItemAt(rpc.Position);
-            if (item == null)
-            {
-                Server_SendLootDeny(peer, "no_item");
-                return;
-            }
-
-            if (IsQuestTagged(item))
-            {
-                Server_SendLootDeny(peer, "quest_item");
-                return;
-            }
-
-            var typeId = item.TypeID;
-            var stack = item.StackCount;
-
-            // 先把这次删除记为一个新 revision，再真正删除。
-            // 这样删除前构建、删除后才到达的旧快照会被客机判为 stale。
-            var takeVersion = NextVersion(inv);
-            inv.RemoveAt(rpc.Position, out _);
-
-            BroadcastLootDelta(inv, rpc.Position, -1, 0, true, takeVersion);
-            SendLootTakeOk(peer, rpc.Token, inv, rpc.Position, typeId, stack);
-        }
-        finally
-        {
-            _serverApplyingLoot = false;
-        }
-    }
-
     private void BroadcastLootDelta(Inventory inv, int slot, int typeId, int count, bool cleared, int version = 0)
     {
         var lm = LootManagerInstance;
@@ -1316,22 +1257,6 @@ namespace EscapeFromDuckovCoopMod;
         CoopTool.SendRpcTo(peer, in rpc);
     }
 
-    private void SendLootTakeOk(NetPeer peer, uint token, Inventory inv, int slot, int typeId, int stack)
-    {
-        var lm = LootManagerInstance;
-        if (!IsServer || peer == null || lm == null) return;
-        var rpc = new LootTakeOkRpc
-        {
-            Id = lm.BuildLootIdentifier(inv),
-            Token = token,
-            Slot = slot,
-            TypeId = typeId,
-            Stack = stack
-        };
-
-        CoopTool.SendRpcTo(peer, in rpc);
-    }
-
     public void Client_OnLootPutOk(LootPutOkRpc rpc)
     {
         var lm = LootManagerInstance;
@@ -1360,33 +1285,6 @@ namespace EscapeFromDuckovCoopMod;
             }
         }
         finally { _applyingLootState = applying; }
-    }
-
-    public void Client_OnLootTakeOk(LootTakeOkRpc rpc)
-    {
-        var lm = LootManagerInstance;
-        if (IsServer || lm == null) return;
-        var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
-
-        if (inv)
-        {
-            var applying = _applyingLootState;
-            _applyingLootState = true;
-            try
-            {
-                if (rpc.Slot >= 0 && rpc.Slot < inv.Capacity)
-                {
-                    var item = inv.GetItemAt(rpc.Slot);
-                    // 主机已经删除了整个槽位；客机必须按确认再删一次。
-                    // 只依赖本地 RemoveAt 时，若快照稍后把物品恢复，就会表现为“可以一直拿”。
-                    if (item != null && (rpc.TypeId < 0 || item.TypeID == rpc.TypeId))
-                        inv.RemoveAt(rpc.Slot, out _);
-                }
-            }
-            finally { _applyingLootState = applying; }
-        }
-
-        lm._cliPendingTake.Remove(rpc.Token);
     }
 
     private static void ApplyNestedSlots(Item target, ItemSnapshot snapshot)

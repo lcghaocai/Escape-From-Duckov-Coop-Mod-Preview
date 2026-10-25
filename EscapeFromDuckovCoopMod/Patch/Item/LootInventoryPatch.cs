@@ -51,7 +51,7 @@ internal static class LootInventoryPatch
             return;
         }
         LootUiGuards.InLootAddAtDepth = __state;
-        if (!__result || !item) return;
+        if (!__result || !item || !ReferenceEquals(item.InInventory, __instance)) return;
         NotifySlotChanged(__instance, atPosition, item, true);
     }
 
@@ -79,7 +79,7 @@ internal static class LootInventoryPatch
         {
             return;
         }
-        if (!__result || item == null) return;
+        if (!__result || item == null || !ReferenceEquals(item.InInventory, __instance)) return;
         var pos = __instance.GetLastItemPosition();
         if (pos >= 0)
             NotifySlotChanged(__instance, pos, item, true);
@@ -295,36 +295,14 @@ internal static class ClientLootAddItemPatch
 [HarmonyPatch(typeof(Inventory), nameof(Inventory.RemoveAt))]
 internal static class ClientLootRemoveAtPatch
 {
-    private static bool Prefix(Inventory __instance, int position)
+    [HarmonyPriority(Priority.First)]
+    private static bool Prefix(Inventory __instance, int position, object[] __args, ref bool __result)
     {
-      //  if (LevelManager.Instance == null || MultiSceneCore.Instance == null) return true;
-        var service = NetService.Instance;
-        var lootNet = COOPManager.LootNet;
-        if (service == null || !service.networkStarted || lootNet == null)
-            return true;
-
-        var serverLoading = NetService.Instance.IsServer && SceneNet.Instance.IsServerLoadInProgress();
-        if (serverLoading)
-        {
-            return true;
-        }
-
-        if (lootNet.ApplyingLootState) return true;
-        if (!LootboxDetectUtil.TryResolveLootOwner(__instance, out var lootInv, out var ownerSlot, out var master))
-            return true;
-        if (LootboxDetectUtil.IsPrivateInventory(lootInv)) return true;
-        if (!lootNet.Client_ShouldSendLootChange(lootInv)) return true;
-
-        if (master != null && ownerSlot >= 0 && !ReferenceEquals(__instance, lootInv))
-        {
-            lootNet.Client_RequestLootSlotSnapshot(lootInv, master);
-            return true;
-        }
-
-        lootNet.Client_SendLootTakeRequest(lootInv, position);
-        // Let the local removal continue so the dragged item is detached; the host
-        // delta will confirm or correct the slot state.
-        return true;
+        var net = COOPManager.LootNet;
+        if (net?.HoldWorldLoot(__instance) != true) return true;
+        net.RequestTake(__instance.GetItemAt(position));
+        __args[1] = null; __result = false;
+        return false;
     }
 }
 
@@ -396,6 +374,14 @@ internal static class ItemDropPatch
             return true;
 
         if (item == null) return false;
+
+        if (COOPManager.LootNet?.HoldWorldLoot(item.InInventory) == true)
+        {
+            // A preview is not owned by this guest and cannot create a world drop.
+            CharacterMainControl.Main?.PopText("请先取出物品，再丢弃", 1f);
+            __result = null;
+            return false;
+        }
 
         if (SharedHomeStorage.RequestEdit(item, new
         {

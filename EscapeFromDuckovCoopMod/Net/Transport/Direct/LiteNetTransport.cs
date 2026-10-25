@@ -81,7 +81,7 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         for (var i = 0; IsRunning && i < MaxPacketsPerPoll; i++)
         {
             if (i > 0 && _now() >= deadline) break;
-            if (!_received.TryDequeue(out var packet)) break;
+            if (!_received.TryDequeue(out var packet, _now())) break;
             var handlerStart = _now();
             try
             {
@@ -102,7 +102,7 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         {
             _nextBacklogReportAt = _now() + 5;
             var snapshot = GetReceiveQueueSnapshot();
-            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={snapshot.Count} combat={snapshot.CombatCount} oldestMs={snapshot.OldestWaitMs:0.0} coalescedStates={_received.CoalescedCount} budgetMs=4 pollMaxMs={_nativePollMaxMs:0.0} ops=[{_receiveDiagnostics.Summary()}]");
+            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={snapshot.Count} combat={snapshot.CombatCount} oldestMs={snapshot.OldestWaitMs:0.0} audio={_received.TransientCount} audioExpired={_received.ExpiredCount} audioOverflow={_received.OverflowCount} coalescedStates={_received.CoalescedCount} budgetMs=4 pollMaxMs={_nativePollMaxMs:0.0} ops=[{_receiveDiagnostics.Summary()}]");
             _receiveDiagnostics.ResetWindow();
             _nativePollMaxMs = 0;
         }
@@ -141,6 +141,14 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         if (!_peers.TryGetValue(peer, out var wrapper)) { reader.Recycle(); return; }
         var packet = new PendingPacket(wrapper, reader, channel, delivery, _now(), _receiveGeneration);
         _receiveDiagnostics.Enqueue(packet.OpCode, packet.Bytes);
+        // Only verified one-shot audio is sent unreliably. Stateful/reliable audio
+        // remains in the ordinary FIFO and is never expired here.
+        if (delivery == DeliveryMethod.Unreliable &&
+            (packet.OpCode == (byte)Op.AUDIO_EVENT || packet.OpCode == (byte)Op.AI_SOUND_EVENT))
+        {
+            _received.EnqueueTransient(packet, packet.QueuedAt);
+            return;
+        }
         // Coalesce only replaceable state, never shots, damage, spawns, inventory
         // operations or snapshots. The peer AND entity are part of the key.
         if (delivery == DeliveryMethod.Unreliable || delivery == DeliveryMethod.Sequenced)

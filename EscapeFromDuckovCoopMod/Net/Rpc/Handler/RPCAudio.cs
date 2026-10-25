@@ -8,8 +8,8 @@ public static class RPCAudio
 
         if (context.IsServer)
         {
-            if (CoopCombatAudio.IsTransientGunshot(message.Payload))
-                CoopTool.SendUnreliableRpc(in message, context.Sender);
+            if (CoopCombatAudio.IsTransientOneShot(message.Payload))
+                CoopTransientAudio.Send(in message, context.Sender);
             else
                 CoopTool.SendRpc(in message, context.Sender);
         }
