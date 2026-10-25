@@ -13,6 +13,7 @@ public struct AISpawnRpc : IRpcMessage
         Entry.Serialize(writer);
         Entry.WriteBuffLayers(writer);
         writer.Put(Entry.HealthTimestamp);
+        writer.Put(Entry.MetadataVersion);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -20,5 +21,6 @@ public struct AISpawnRpc : IRpcMessage
         Entry.Deserialize(reader);
         if (reader.AvailableBytes > 0) Entry.ReadBuffLayers(reader);
         Entry.HealthTimestamp = reader.AvailableBytes >= sizeof(double) ? reader.GetDouble() : 0d;
+        Entry.MetadataVersion = reader.AvailableBytes >= sizeof(int) ? reader.GetInt() : 0;
     }
 }

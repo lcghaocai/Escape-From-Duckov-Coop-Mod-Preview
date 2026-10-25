@@ -25,6 +25,8 @@ namespace EscapeFromDuckovCoopMod
     public enum AIStatus : byte { Dormant, Active, Dead }
     internal static class ItemTool
     {
+        internal static int ComputeSnapshotHash(ItemSnapshot item) =>
+            throw new NotSupportedException("Nested Unity item hashing is outside this test");
         internal static void WriteItemSnapshot(NetDataWriter writer, ItemSnapshot item) =>
             throw new NotSupportedException("Nested Unity items are outside the wire-tail test");
         internal static ItemSnapshot ReadItemSnapshot(NetPacketReader reader) =>

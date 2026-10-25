@@ -82,6 +82,7 @@ public sealed partial class AISyncService
     private readonly Dictionary<int, HashSet<NetPeer>> _serverWatchers = new();
     private readonly Dictionary<int, Queue<(int weaponTypeId, int buffId)>> _serverPendingBuffs = new();
     private readonly Dictionary<int, RemoteAIReplica> _clientReplicas = new();
+    private readonly ReceivedSnapshotMetadata _clientSnapshotMetadata = new();
     private readonly HashSet<int> _clientQuestKillCreditRaised = new();
     private readonly Dictionary<int, float> _clientRequested = new();
     private readonly Queue<int> _clientReplicaSpawnQueue = new();
@@ -91,7 +92,6 @@ public sealed partial class AISyncService
     private readonly Dictionary<int, List<(int weaponTypeId, int buffId, int? layers, bool refresh)>> _clientPendingBuffs = new();
     private readonly Dictionary<int, float> _lastHealthBroadcastTime = new();
     private readonly Dictionary<int, PendingHealthBroadcast> _pendingHealthBroadcasts = new();
-    private readonly Dictionary<int, int> _lastSnapshotSignatures = new();
     private readonly Dictionary<int, int> _lastStateSignatures = new();
     private readonly Dictionary<int, int> _lastHealthSignatures = new();
     private readonly Dictionary<int, float> _clientNextMissingModelWarning = new();
@@ -229,6 +229,8 @@ public sealed partial class AISyncService
         AiQuestCredit.Reset();
         _serverSnapshotChunks.Clear();
         _serverSnapshotRequests.Clear();
+        _serverSnapshotMetadata.Clear();
+        _clientSnapshotMetadata.Clear();
         ResetNativeAreas();
         _clientBuffOrder.Clear();
         _aiBuffReplayOrder.Clear();
@@ -243,7 +245,6 @@ public sealed partial class AISyncService
             _drainingBuffIds.Clear();
             _lastHealthBroadcastTime.Clear();
             _pendingHealthBroadcasts.Clear();
-            _lastSnapshotSignatures.Clear();
             _lastStateSignatures.Clear();
             _lastHealthSignatures.Clear();
             _serverNextWatcherRefresh.Clear();
@@ -549,7 +550,12 @@ public sealed partial class AISyncService
                 pending.Scene == scene && now - pending.Time < 1f) return;
             _serverSnapshotChunks.Remove(context.Sender);
         }
-        _serverSnapshotRequests[context.Sender] = (scene, now);
+        var fullTime = !message.VehiclesOnly ? now :
+            _serverSnapshotRequests.TryGetValue(context.Sender, out var previous) && previous.Scene == scene
+                ? previous.FullTime : float.NegativeInfinity;
+        if (!_serverSnapshotRequests.TryGetValue(context.Sender, out var lastRequest) || lastRequest.Scene != scene)
+            _serverSnapshotMetadata.Remove(context.Sender);
+        _serverSnapshotRequests[context.Sender] = (scene, now, fullTime);
 
         // Keep the request even if the reliable queue is busy. Building full
         // equipment/buff snapshots here used to repeat all that work at send time.
@@ -613,6 +619,7 @@ public sealed partial class AISyncService
         if (!IsServer || peer == null) return;
         _serverSnapshotChunks.Remove(peer);
         _serverSnapshotRequests.Remove(peer);
+        _serverSnapshotMetadata.Remove(peer);
 
         foreach (var watchers in _serverWatchers.Values)
             watchers?.Remove(peer);
@@ -694,7 +701,8 @@ public sealed partial class AISyncService
 
         foreach (var snap in message.Entries)
         {
-            if (!IsClientEntryInRange(in snap, GetClientSnapshotRange(snap.IsVehicle)) && !HasNativeArea(snap.CharacterPresetKey))
+            if (!IsClientEntryInRange(in snap, GetClientSnapshotRange(snap.IsVehicle)) &&
+                !(snap.MetadataOmitted ? snap.KeepOutsideRange : HasNativeArea(snap.CharacterPresetKey)))
                 continue;
 
             if (_pendingSnapshotQueue.Count >= MaxPendingSnapshotQueue)
@@ -703,6 +711,7 @@ public sealed partial class AISyncService
                 _droppedSnapshotCount++;
             }
             var orderedSnapshot = snap;
+            orderedSnapshot.MetadataReceiveOrder = _clientSnapshotMetadata.Receive();
             orderedSnapshot.HealthReceiveOrder = _clientHealthOrder.Receive();
             orderedSnapshot.BuffReceiveOrder = _clientBuffOrder.Receive();
             _pendingSnapshotQueue.Enqueue(orderedSnapshot);
@@ -752,6 +761,7 @@ public sealed partial class AISyncService
         var snapshot = message.Entry;
         snapshot.HealthReceiveOrder = _clientHealthOrder.Receive();
         snapshot.BuffReceiveOrder = _clientBuffOrder.Receive();
+        snapshot.MetadataReceiveOrder = _clientSnapshotMetadata.Receive();
         ApplySnapshot(entry, in snapshot);
 
         // A delayed pre-death spawn must not reset the once-only kill credit.
@@ -1092,6 +1102,23 @@ public sealed partial class AISyncService
         while (processed < budget && _pendingSnapshotQueue.Count > 0)
         {
             var snap = _pendingSnapshotQueue.Dequeue();
+            if (snap.MetadataOmitted)
+            {
+                // The client may have moved since receipt. Do not request full
+                // metadata for a deliberately culled, out-of-range actor.
+                if (!IsClientWithinRange(snap.LastKnownPosition, GetClientSnapshotRange(snap.IsVehicle)) &&
+                    !snap.KeepOutsideRange) { processed++; continue; }
+                var validMetadata = _clientSnapshotMetadata.CanApplyRefresh(snap.Id, snap.MetadataVersion,
+                    snap.MetadataReceiveOrder, out var needsRecovery);
+                if (!CoopSyncDatabase.AI.TryGet(snap.Id, out var known) || !validMetadata)
+                {
+                    // Includes changed metadata discarded by range/budget checks.
+                    // Older queued refreshes must not undo a newer full spawn.
+                    if (known == null || needsRecovery) Client_TryScheduleSnapshotRecovery(true);
+                    processed++;
+                    continue;
+                }
+            }
             var entry = CoopSyncDatabase.AI.GetOrCreate(snap.Id);
             ApplySnapshot(entry, in snap);
             if (entry.Status == AIStatus.Dead)
@@ -2235,27 +2262,43 @@ public sealed partial class AISyncService
     private void Server_SendSnapshotChunk(NetPeer peer, List<AISnapshotEntry> buffer, bool reset)
     {
         if (!IsServer || peer == null || buffer == null) return;
-
-        var descriptor = RpcRegistry.GetDescriptor<AISnapshotChunkRpc>();
-        var message = new AISnapshotChunkRpc
+        var full = new List<AISnapshotEntry>(buffer.Count);
+        var refresh = new List<AISnapshotEntry>(buffer.Count);
+        var signatures = new List<int>(buffer.Count);
+        foreach (var snapshot in buffer)
         {
-            Reset = reset,
-            EntryList = buffer,
-            EntryCount = buffer.Count
-        };
-
+            var signature = snapshot.MetadataVersion;
+            if (!reset && _serverSnapshotMetadata.Matches(peer, snapshot.Id, signature))
+                refresh.Add(snapshot);
+            else
+            {
+                full.Add(snapshot);
+                signatures.Add(signature);
+            }
+        }
         var writer = RpcWriterPool.Rent();
         try
         {
-            writer.Put((byte)descriptor.Op);
-            message.Serialize(writer);
-            peer.Send(writer, descriptor.Delivery);
-            _perfSnapshotPackets++;
+            if (full.Count > 0 || buffer.Count == 0 || reset)
+            {
+                var message = new AISnapshotChunkRpc { Reset = reset, EntryList = full, EntryCount = full.Count };
+                writer.Put((byte)Op.AI_SNAPSHOT_CHUNK);
+                message.Serialize(writer);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                for (var i = 0; i < full.Count; i++)
+                    _serverSnapshotMetadata.Record(peer, full[i].Id, signatures[i]);
+                _perfSnapshotPackets++;
+            }
+            if (refresh.Count > 0)
+            {
+                writer.Reset();
+                writer.Put((byte)Op.AI_REFRESH_CHUNK);
+                new AIRefreshChunkRpc { Entries = refresh.ToArray() }.Serialize(writer);
+                peer.Send(writer, DeliveryMethod.ReliableOrdered);
+                _perfSnapshotPackets++;
+            }
         }
-        finally
-        {
-            RpcWriterPool.Return(writer);
-        }
+        finally { RpcWriterPool.Return(writer); }
     }
 
     private bool Server_BroadcastSnapshotToAll(bool reset)
@@ -2268,8 +2311,10 @@ public sealed partial class AISyncService
         var buffers = statuses.Keys
             .Where(peer => peer != null && peer.ConnectionState == ConnectionState.Connected &&
                 !_serverSnapshotChunks.Contains(peer) &&
+                (!_serverSnapshotRequests.TryGetValue(peer, out var requested) ||
+                    Time.unscaledTime - requested.FullTime >= SnapshotRefreshInterval + SnapshotRequestTimeout) &&
                 service.netManager.GetReliableQueueLength(peer) < MaxReliableQueueBeforeSnapshot)
-            .ToDictionary(peer => peer, _ => new List<AISnapshotEntry>(SnapshotChunkSize));
+            .ToDictionary(peer => peer, _ => new List<int>(SnapshotChunkSize));
         if (buffers.Count == 0) return false;
         var resetPending = reset ? new HashSet<NetPeer>(buffers.Keys) : new HashSet<NetPeer>();
         var range = Mathf.Max(ActivationRadius, VehicleReplicaKeepAliveDistance) * 1.2f;
@@ -2278,17 +2323,13 @@ public sealed partial class AISyncService
         {
             if (entry == null) continue;
 
-            var snapshot = BuildSnapshotEntry(entry);
-            var duplicate = HasDuplicateSnapshot(entry.Id, in snapshot);
-            if (!reset && duplicate) continue;
-
             foreach (var pair in buffers)
             {
-                if (!IsPeerWithinRange(pair.Key, GetSnapshotAnchor(in snapshot), range) && !HasNativeArea(entry.CharacterPresetKey)) continue;
-                pair.Value.Add(snapshot);
+                if (!IsPeerWithinRange(pair.Key, GetEntryAnchor(entry), range) && !HasNativeArea(entry.CharacterPresetKey)) continue;
+                pair.Value.Add(entry.Id);
                 if (pair.Value.Count >= SnapshotChunkSize)
                 {
-                    SendSnapshotChunk(pair.Key, pair.Value, resetPending.Remove(pair.Key));
+                    QueueSnapshotIds(pair.Key, pair.Value.ToArray(), resetPending.Remove(pair.Key));
                     pair.Value.Clear();
                     sent = true;
                 }
@@ -2298,7 +2339,7 @@ public sealed partial class AISyncService
         {
             if (pair.Value.Count > 0)
             {
-                SendSnapshotChunk(pair.Key, pair.Value, resetPending.Remove(pair.Key));
+                QueueSnapshotIds(pair.Key, pair.Value.ToArray(), resetPending.Remove(pair.Key));
                 sent = true;
             }
         }
@@ -2440,89 +2481,9 @@ public sealed partial class AISyncService
             snapshot.BuffIds = Array.Empty<int>();
         }
 
+        snapshot.KeepOutsideRange = HasNativeArea(entry.CharacterPresetKey);
+        snapshot.MetadataVersion = AISnapshotMetadata.Signature(in snapshot);
         return snapshot;
-    }
-
-    private bool HasDuplicateSnapshot(int id, in AISnapshotEntry snapshot)
-    {
-        var signature = ComputeSnapshotSignature(in snapshot);
-        if (_lastSnapshotSignatures.TryGetValue(id, out var last) && last == signature)
-            return true;
-
-        _lastSnapshotSignatures[id] = signature;
-        return false;
-    }
-
-    private static int ComputeSnapshotSignature(in AISnapshotEntry snapshot)
-    {
-        var hash = new HashCode();
-        hash.Add(snapshot.Id);
-        hash.Add(snapshot.SceneBuildIndex);
-        hash.Add(snapshot.ScenePath);
-        hash.Add(snapshot.SpawnPosition);
-        hash.Add(snapshot.SpawnRotation);
-        hash.Add(snapshot.ModelName);
-        hash.Add(snapshot.CustomFaceJson);
-        hash.Add(snapshot.CharacterPresetKey);
-        hash.Add(snapshot.HideIfFoundEnemyName);
-        hash.Add(snapshot.Status);
-        hash.Add(snapshot.Activated);
-        hash.Add(snapshot.Team);
-        hash.Add(snapshot.MaxHealth);
-        hash.Add(snapshot.CurrentHealth);
-        hash.Add(snapshot.BodyArmor);
-        hash.Add(snapshot.HeadArmor);
-        hash.Add(snapshot.ShowHealthBar);
-        hash.Add(snapshot.IsVehicle);
-        hash.Add(snapshot.VehicleAnimationType);
-        hash.Add(snapshot.VehicleWalkSpeed);
-        hash.Add(snapshot.VehicleRunSpeed);
-        hash.Add(snapshot.ActiveWeaponSlot);
-        hash.Add(snapshot.ActiveWeaponTypeId);
-        hash.Add(snapshot.LastKnownPosition);
-        hash.Add(snapshot.LastKnownRotation);
-        hash.Add(snapshot.LastKnownVelocity);
-
-        if (snapshot.EquipmentSlots != null && snapshot.EquipmentItemTypeIds != null)
-        {
-            var length = Math.Min(snapshot.EquipmentSlots.Length, snapshot.EquipmentItemTypeIds.Length);
-            for (var i = 0; i < length; i++)
-            {
-                hash.Add(snapshot.EquipmentSlots[i]);
-                hash.Add(snapshot.EquipmentItemTypeIds[i]);
-            }
-        }
-
-        if (snapshot.WeaponSlots != null && snapshot.WeaponItemTypeIds != null)
-        {
-            var length = Math.Min(snapshot.WeaponSlots.Length, snapshot.WeaponItemTypeIds.Length);
-            for (var i = 0; i < length; i++)
-            {
-                hash.Add(snapshot.WeaponSlots[i]);
-                hash.Add(snapshot.WeaponItemTypeIds[i]);
-            }
-        }
-
-        if (snapshot.WeaponItemSnapshots != null && snapshot.WeaponItemSnapshots.Length > 0)
-        {
-            foreach (var snap in snapshot.WeaponItemSnapshots)
-            {
-                hash.Add(ItemTool.ComputeSnapshotHash(snap));
-            }
-        }
-
-        if (snapshot.BuffWeaponTypeIds != null && snapshot.BuffIds != null)
-        {
-            var length = Math.Min(snapshot.BuffWeaponTypeIds.Length, snapshot.BuffIds.Length);
-            for (var i = 0; i < length; i++)
-            {
-                hash.Add(snapshot.BuffWeaponTypeIds[i]);
-                hash.Add(snapshot.BuffIds[i]);
-                if (snapshot.BuffLayers != null && i < snapshot.BuffLayers.Length) hash.Add(snapshot.BuffLayers[i]);
-            }
-        }
-
-        return hash.ToHashCode();
     }
 
     private static int ComputeStateSignature(in AIStateUpdateRpc message)
@@ -2579,19 +2540,27 @@ public sealed partial class AISyncService
 
     private void ApplySnapshot(AISyncEntry entry, in AISnapshotEntry snapshot)
     {
-        entry.Id = snapshot.Id;
-        entry.SpawnPosition = snapshot.SpawnPosition;
-        entry.SpawnRotation = snapshot.SpawnRotation;
-        if (!string.IsNullOrEmpty(snapshot.ModelName))
-            entry.ModelName = NormalizePrefabName(snapshot.ModelName);
-        entry.CustomFaceJson = snapshot.CustomFaceJson;
-        if (!string.IsNullOrEmpty(snapshot.CharacterPresetKey))
-            entry.CharacterPresetKey = snapshot.CharacterPresetKey;
-        entry.HideIfFoundEnemyName = snapshot.HideIfFoundEnemyName;
-        entry.SceneBuildIndex = snapshot.SceneBuildIndex;
-        entry.ScenePath = snapshot.ScenePath;
-        entry.Team = snapshot.Team;
-        var forceSpawn = IsForceSpawnModel(snapshot.ModelName) || snapshot.IsVehicle;
+        var applyMetadata = !snapshot.MetadataOmitted && _clientSnapshotMetadata.TryApplyFull(
+            snapshot.Id, snapshot.MetadataVersion, snapshot.MetadataReceiveOrder);
+        if (applyMetadata)
+        {
+            entry.Id = snapshot.Id;
+            entry.SpawnPosition = snapshot.SpawnPosition;
+            entry.SpawnRotation = snapshot.SpawnRotation;
+            if (!string.IsNullOrEmpty(snapshot.ModelName)) entry.ModelName = NormalizePrefabName(snapshot.ModelName);
+            entry.CustomFaceJson = snapshot.CustomFaceJson;
+            if (!string.IsNullOrEmpty(snapshot.CharacterPresetKey)) entry.CharacterPresetKey = snapshot.CharacterPresetKey;
+            entry.HideIfFoundEnemyName = snapshot.HideIfFoundEnemyName;
+            entry.SceneBuildIndex = snapshot.SceneBuildIndex;
+            entry.ScenePath = snapshot.ScenePath;
+            entry.Team = snapshot.Team;
+            entry.ShowHealthBar = snapshot.ShowHealthBar;
+            entry.IsVehicle = snapshot.IsVehicle;
+            entry.VehicleAnimationType = snapshot.VehicleAnimationType;
+            entry.VehicleWalkSpeed = snapshot.VehicleWalkSpeed;
+            entry.VehicleRunSpeed = snapshot.VehicleRunSpeed;
+        }
+        var forceSpawn = IsForceSpawnModel(entry.ModelName) || entry.IsVehicle;
         var applyHealth = _clientHealthOrder.TryApply(entry.Id, snapshot.HealthReceiveOrder, snapshot.HealthTimestamp);
         if (applyHealth)
         {
@@ -2606,56 +2575,54 @@ public sealed partial class AISyncService
         entry.Activated = forceSpawn || snapshot.Activated;
         if (entry.Status == AIStatus.Dead)
             entry.Activated = false;
-        entry.ShowHealthBar = snapshot.ShowHealthBar;
-        entry.IsVehicle = snapshot.IsVehicle;
-        entry.VehicleAnimationType = snapshot.VehicleAnimationType;
-        entry.VehicleWalkSpeed = snapshot.VehicleWalkSpeed;
-        entry.VehicleRunSpeed = snapshot.VehicleRunSpeed;
         SetActiveWeapon(entry.Id, snapshot.ActiveWeaponSlot, snapshot.ActiveWeaponTypeId);
         if (entry.IsVehicle || snapshot.LastKnownRemoteTime >= entry.LastKnownRemoteTime)
         {
-            entry.LastKnownPosition = snapshot.LastKnownPosition != Vector3.zero ? snapshot.LastKnownPosition : snapshot.SpawnPosition;
-            entry.LastKnownRotation = snapshot.LastKnownRotation != Quaternion.identity ? snapshot.LastKnownRotation : snapshot.SpawnRotation;
+            entry.LastKnownPosition = snapshot.MetadataOmitted || snapshot.LastKnownPosition != Vector3.zero ? snapshot.LastKnownPosition : entry.SpawnPosition;
+            entry.LastKnownRotation = snapshot.MetadataOmitted || snapshot.LastKnownRotation != Quaternion.identity ? snapshot.LastKnownRotation : entry.SpawnRotation;
             entry.LastKnownVelocity = snapshot.LastKnownVelocity;
             entry.LastKnownRemoteTime = snapshot.LastKnownRemoteTime;
         }
-        entry.PositionKey = AISyncRegistry.ComputePositionKey(entry.SpawnPosition, entry.SceneBuildIndex, entry.ScenePath);
-
-        entry.Equipment.Clear();
-        if (snapshot.EquipmentSlots != null && snapshot.EquipmentItemTypeIds != null)
+        if (applyMetadata)
         {
-            var count = Math.Min(snapshot.EquipmentSlots.Length, snapshot.EquipmentItemTypeIds.Length);
-            for (var i = 0; i < count; i++)
+            entry.PositionKey = AISyncRegistry.ComputePositionKey(entry.SpawnPosition, entry.SceneBuildIndex, entry.ScenePath);
+
+            entry.Equipment.Clear();
+            if (snapshot.EquipmentSlots != null && snapshot.EquipmentItemTypeIds != null)
             {
-                var slot = snapshot.EquipmentSlots[i];
-                if (string.IsNullOrEmpty(slot)) continue;
-                entry.Equipment[slot] = snapshot.EquipmentItemTypeIds[i];
+                var count = Math.Min(snapshot.EquipmentSlots.Length, snapshot.EquipmentItemTypeIds.Length);
+                for (var i = 0; i < count; i++)
+                {
+                    var slot = snapshot.EquipmentSlots[i];
+                    if (string.IsNullOrEmpty(slot)) continue;
+                    entry.Equipment[slot] = snapshot.EquipmentItemTypeIds[i];
+                }
             }
-        }
 
-        entry.Weapons.Clear();
-        entry.WeaponSnapshots.Clear();
-        if (snapshot.WeaponSlots != null && snapshot.WeaponItemTypeIds != null)
-        {
-            var count = Math.Min(snapshot.WeaponSlots.Length, snapshot.WeaponItemTypeIds.Length);
-            for (var i = 0; i < count; i++)
+            entry.Weapons.Clear();
+            entry.WeaponSnapshots.Clear();
+            if (snapshot.WeaponSlots != null && snapshot.WeaponItemTypeIds != null)
             {
-                var slot = snapshot.WeaponSlots[i];
-                if (string.IsNullOrEmpty(slot)) continue;
-                entry.Weapons[slot] = snapshot.WeaponItemTypeIds[i];
+                var count = Math.Min(snapshot.WeaponSlots.Length, snapshot.WeaponItemTypeIds.Length);
+                for (var i = 0; i < count; i++)
+                {
+                    var slot = snapshot.WeaponSlots[i];
+                    if (string.IsNullOrEmpty(slot)) continue;
+                    entry.Weapons[slot] = snapshot.WeaponItemTypeIds[i];
+                }
             }
-        }
 
-        if (snapshot.WeaponSlots != null && snapshot.WeaponItemSnapshots != null)
-        {
-            var count = Math.Min(snapshot.WeaponSlots.Length, snapshot.WeaponItemSnapshots.Length);
-            for (var i = 0; i < count; i++)
+            if (snapshot.WeaponSlots != null && snapshot.WeaponItemSnapshots != null)
             {
-                var slot = snapshot.WeaponSlots[i];
-                if (string.IsNullOrEmpty(slot)) continue;
-                var snap = snapshot.WeaponItemSnapshots[i];
-                if (snap.TypeId != 0)
-                    entry.WeaponSnapshots[slot] = snap;
+                var count = Math.Min(snapshot.WeaponSlots.Length, snapshot.WeaponItemSnapshots.Length);
+                for (var i = 0; i < count; i++)
+                {
+                    var slot = snapshot.WeaponSlots[i];
+                    if (string.IsNullOrEmpty(slot)) continue;
+                    var snap = snapshot.WeaponItemSnapshots[i];
+                    if (snap.TypeId != 0)
+                        entry.WeaponSnapshots[slot] = snap;
+                }
             }
         }
 
@@ -2753,7 +2720,7 @@ public sealed partial class AISyncService
             TryApplyVehicleSpeedStats(characterItemInstance, entry);
            // MultiplyCharacterStat(characterItemInstance,"WalkSpeed",cmc.characterPreset.moveSpeedFactor);
            // MultiplyCharacterStat(characterItemInstance,"RunSpeed", cmc.characterPreset.moveSpeedFactor);
-            
+
             ApplyVehicleState(cmc, entry);
             RPCVehicle.TryApplyCachedVehicleItemState(entry.Id, cmc);
             ApplySpecialAttachments(cmc,entry);
@@ -2769,7 +2736,7 @@ public sealed partial class AISyncService
                 modelRoot.gameObject.SetActive(false);
                 entry.ShowHealthBar = false;
             }
-            
+
             ApplyCustomFace(cmc.characterModel, entry.CustomFaceJson);
             await ApplyEquipmentAsync(cmc.characterModel, new Dictionary<string, int>(entry.Equipment),
                 new Dictionary<string, int>(entry.Weapons), new Dictionary<string, ItemSnapshot>(entry.WeaponSnapshots),
@@ -2828,7 +2795,7 @@ public sealed partial class AISyncService
             {
                 cmc.Health.showHealthBar = false;
             }
-            
+
             var replica = new RemoteAIReplica(entry.Id, instance, cmc, entry, this);
             _clientReplicas[entry.Id] = replica;
             completed = true;
@@ -4367,7 +4334,7 @@ public sealed partial class AISyncService
             }
         }
 
-       
+
         private void OnHurt(DamageInfo info)
         {
             //if (_suppressHealthReport || _service == null || _health == null) return;

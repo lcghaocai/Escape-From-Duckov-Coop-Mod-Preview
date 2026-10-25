@@ -5,21 +5,17 @@ namespace EscapeFromDuckovCoopMod;
 public sealed partial class AISyncService
 {
     private readonly SnapshotWorkQueue<NetPeer, Queue<(int[] Ids, bool Reset)>> _serverSnapshotChunks = new();
-    private readonly Dictionary<NetPeer, (string Scene, float Time)> _serverSnapshotRequests = new();
+    private readonly SnapshotMetadataCache<NetPeer> _serverSnapshotMetadata = new();
+    private readonly Dictionary<NetPeer, (string Scene, float Time, float FullTime)> _serverSnapshotRequests = new();
     private static double SnapshotTime() => (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
 
     private IEnumerable<AISyncEntry> Server_SnapshotEntries() => CoopSyncDatabase.AI.Entries
         .OrderByDescending(entry => entry != null && HasNativeArea(entry.CharacterPresetKey));
 
-    private void SendSnapshotChunk(NetPeer peer, IReadOnlyList<AISnapshotEntry> entries, bool reset)
-    {
-        if (entries == null) return;
-        QueueSnapshotIds(peer, entries.Select(e => e.Id).ToArray(), reset);
-    }
-
     private void QueueSnapshotIds(NetPeer peer, int[] ids, bool reset)
     {
         if (!IsServer || peer == null) return;
+        if (reset) _serverSnapshotMetadata.Remove(peer);
         if (!_serverSnapshotChunks.TryGet(peer, out var chunks))
         {
             chunks = new();

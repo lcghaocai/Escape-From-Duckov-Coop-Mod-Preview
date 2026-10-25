@@ -58,6 +58,7 @@ public enum Op : byte
 
     AI_SNAPSHOT_REQUEST = 211,
     AI_SNAPSHOT_CHUNK = 212,
+    AI_REFRESH_CHUNK = 219, // Compact periodic state; full metadata stays on AI_SNAPSHOT_CHUNK.
     AI_ACTIVATION_REQUEST = 213,
     AI_SPAWN = 214,
     AI_DESPAWN = 215,

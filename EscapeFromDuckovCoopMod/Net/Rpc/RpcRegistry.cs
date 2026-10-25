@@ -84,6 +84,7 @@ public static class RpcRegistry
         Register<ItemDropSnapshotChunkRpc>(RPCItem.HandleDropSnapshotChunk);
         Register<AISnapshotRequestRpc>(RPCAI.HandleSnapshotRequest);
         Register<AISnapshotChunkRpc>(RPCAI.HandleSnapshotChunk);
+        Register<AIRefreshChunkRpc>(RPCAI.HandleRefreshChunk);
         Register<AIActivationRequestRpc>(RPCAI.HandleActivationRequest);
         Register<AISpawnerTriggerRequestRpc>(RPCAI.HandleSpawnerTriggerRequest);
         Register<AIActivationStateRpc>(RPCAI.HandleActivationState);

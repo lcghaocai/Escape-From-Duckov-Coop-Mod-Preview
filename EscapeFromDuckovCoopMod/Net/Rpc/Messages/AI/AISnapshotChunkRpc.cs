@@ -38,6 +38,8 @@ public struct AISnapshotChunkRpc : IRpcMessage
         // Optional health stamps are a separate tail, preserving legacy entry boundaries.
         for (var i = 0; i < count; i++)
             writer.Put((list != null ? list[i] : Entries[i]).HealthTimestamp);
+        for (var i = 0; i < count; i++)
+            writer.Put((list != null ? list[i] : Entries[i]).MetadataVersion);
     }
 
     public void Deserialize(NetPacketReader reader)
@@ -55,11 +57,17 @@ public struct AISnapshotChunkRpc : IRpcMessage
             Entries[i].ReadBuffLayers(reader);
         if (reader.AvailableBytes >= count * sizeof(double))
             for (var i = 0; i < count; i++) Entries[i].HealthTimestamp = reader.GetDouble();
+        if (reader.AvailableBytes >= count * sizeof(int))
+            for (var i = 0; i < count; i++) Entries[i].MetadataVersion = reader.GetInt();
     }
 }
 
 public struct AISnapshotEntry
 {
+    internal bool MetadataOmitted;
+    internal bool KeepOutsideRange;
+    internal int MetadataVersion;
+    internal long MetadataReceiveOrder;
     // Local receipt order survives the deferred snapshot queue; it is not serialized.
     internal long HealthReceiveOrder;
     public double HealthTimestamp;
@@ -114,6 +122,53 @@ public struct AISnapshotEntry
         for (var i = 0; i < count; i++) BuffLayers[i] = reader.GetInt();
     }
 
+    internal void SerializeRefresh(NetDataWriter writer)
+    {
+        writer.Put(Id);
+        writer.Put(MetadataVersion);
+        writer.Put(IsVehicle);
+        writer.Put(KeepOutsideRange);
+        writer.Put((byte)Status);
+        writer.Put(Activated);
+        writer.Put(MaxHealth);
+        writer.Put(CurrentHealth);
+        writer.Put(BodyArmor);
+        writer.Put(HeadArmor);
+        writer.PutVector3(LastKnownPosition);
+        writer.PutQuaternion(LastKnownRotation);
+        writer.PutVector3(LastKnownVelocity);
+        writer.Put(LastKnownRemoteTime);
+        writer.Put(ActiveWeaponSlot ?? string.Empty);
+        writer.Put(ActiveWeaponTypeId);
+        WriteIntArray(writer, BuffWeaponTypeIds, BuffIds);
+        WriteBuffLayers(writer);
+        writer.Put(HealthTimestamp);
+    }
+
+    internal void DeserializeRefresh(NetPacketReader reader)
+    {
+        MetadataOmitted = true;
+        Id = reader.GetInt();
+        MetadataVersion = reader.GetInt();
+        IsVehicle = reader.GetBool();
+        KeepOutsideRange = reader.GetBool();
+        Status = (AIStatus)reader.GetByte();
+        Activated = reader.GetBool();
+        MaxHealth = reader.GetFloat();
+        CurrentHealth = reader.GetFloat();
+        BodyArmor = reader.GetFloat();
+        HeadArmor = reader.GetFloat();
+        LastKnownPosition = reader.GetVector3();
+        LastKnownRotation = reader.GetQuaternion();
+        LastKnownVelocity = reader.GetVector3();
+        LastKnownRemoteTime = reader.GetDouble();
+        ActiveWeaponSlot = reader.GetString();
+        ActiveWeaponTypeId = reader.GetInt();
+        ReadIntArray(reader, out BuffWeaponTypeIds, out BuffIds);
+        ReadBuffLayers(reader);
+        HealthTimestamp = reader.GetDouble();
+    }
+
     public void Serialize(NetDataWriter writer)
     {
         writer.Put(Id);
@@ -152,6 +207,8 @@ public struct AISnapshotEntry
 
     public void Deserialize(NetPacketReader reader)
     {
+        MetadataOmitted = false;
+        KeepOutsideRange = false;
         Id = reader.GetInt();
         SceneBuildIndex = reader.GetInt();
         ScenePath = reader.GetString();

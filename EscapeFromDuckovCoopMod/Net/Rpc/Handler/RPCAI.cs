@@ -14,6 +14,12 @@ public static class RPCAI
         COOPManager.AI?.Client_HandleSnapshotChunk(message);
     }
 
+    public static void HandleRefreshChunk(RpcContext context, AIRefreshChunkRpc message)
+    {
+        if (context.IsServer) return;
+        COOPManager.AI?.Client_HandleSnapshotChunk(new AISnapshotChunkRpc { Entries = message.Entries });
+    }
+
     public static void HandleActivationRequest(RpcContext context, AIActivationRequestRpc message)
     {
         if (!context.IsServer) return;

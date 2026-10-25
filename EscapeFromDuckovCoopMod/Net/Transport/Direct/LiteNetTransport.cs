@@ -12,7 +12,7 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
     private readonly LiteNetLib.NetManager _manager;
     private readonly Dictionary<LiteNetLib.NetPeer, LiteNetPeer> _peers = new();
     private readonly List<CoopPeer> _connected = new();
-    private readonly OrderedPacketQueue<(CoopPeer Peer, byte Channel, byte Op, string Player, int Ai), PendingPacket> _received
+    private readonly ReceiveWorkQueue<(CoopPeer Peer, byte Channel, byte Op, string Player, int Ai), PendingPacket> _received
         = new(packet => packet.Reader.Recycle());
     private readonly Func<double> _now;
     private double _nextErrorAt;
@@ -29,14 +29,15 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         { Peer = peer; Reader = reader; Channel = channel; Delivery = delivery; }
     }
 
-    public LiteNetTransport(ICoopNetworkListener listener, Func<double> now = null) : base(listener)
+    public LiteNetTransport(ICoopNetworkListener listener, Func<double> now = null, LiteNetLib.Layers.PacketLayerBase packetLayer = null) : base(listener)
     {
         _now = now ?? (() => (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency);
-        _manager = new LiteNetLib.NetManager(this)
+        _manager = new LiteNetLib.NetManager(this, packetLayer)
         {
             BroadcastReceiveEnabled = true,
             UpdateTime = 1,
             PingInterval = 500,
+            ChannelsCount = DirectMessageChannels.Count,
             EnableStatistics = true,
             AutoRecycle = false // Received buffers remain owned until budgeted dispatch.
         };
@@ -79,7 +80,7 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
         if (_received.Count > 0 && _now() >= _nextBacklogReportAt)
         {
             _nextBacklogReportAt = _now() + 5;
-            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={_received.Count} coalescedStates={_received.CoalescedCount} budgetMs=4");
+            CoopLogSystem.WriteNetworkDiagnostic($"[Direct] Receive backlog={_received.Count} combat={_received.CombatCount} coalescedStates={_received.CoalescedCount} budgetMs=4");
         }
     }
     public override int GetReliableQueueLength(CoopPeer peer) => peer is LiteNetPeer direct ? direct.ReliableQueueLength : -1;
@@ -141,7 +142,10 @@ internal sealed class LiteNetTransport : CoopNetworkManager, INetEventListener
             }
             catch { /* Malformed payloads go through the normal RPC validation. */ }
         }
-        _received.Enqueue(packet);
+        // Do not trust arbitrary channel-one packets to receive combat priority.
+        var combat = channel == DirectMessageChannels.Combat && reader.AvailableBytes > 0 &&
+            DirectMessageChannels.Select(reader.RawData[reader.Position], delivery) == DirectMessageChannels.Combat;
+        _received.Enqueue(packet, combat);
     }
     public void OnNetworkReceiveUnconnected(IPEndPoint endpoint, LiteNetLib.NetPacketReader reader, UnconnectedMessageType type)
     {

@@ -1,3 +1,5 @@
+后续局内持续同步修复与 1.4.2.2 联测说明：见同目录 InRaidAudit.txt。当前套件共 19 组检查。
+
 多人进图同步优化验证（2026-10-25）
 
 分支：codex/network-sync-optimization

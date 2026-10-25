@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
-static class Program
+static partial class Program
 {
     private static int _passed;
     private static void Check(bool condition, string message)
@@ -12,6 +12,9 @@ static class Program
 
     public static void Main()
     {
+        Test("combat lane preserves order, ordinary progress and buffer ownership", CombatFairness);
+        Test("AI refresh reuses per-peer metadata and carries live state", CompactRefresh);
+        Test("real UDP: combat arrives while bulk fragments are repeatedly lost", CombatThroughFragmentLoss);
         Test("player health envelopes preserve null buffs and timestamp boundaries", PlayerHealthWireFormat);
         Test("health snapshots and unordered broadcasts use capture order", HealthCaptureOrder);
         Test("same-frame health changes retain the final state", SameFrameHealth);
@@ -148,9 +151,9 @@ static class Program
     {
         var entries = new[]
         {
-            new AISnapshotEntry { Id = 7, CurrentHealth = 91, HealthTimestamp = 10.5,
+            new AISnapshotEntry { Id = 7, CurrentHealth = 91, HealthTimestamp = 10.5, MetadataVersion = 91,
                 BuffIds = new[] { 4, 5 }, BuffWeaponTypeIds = new[] { 8, 9 }, BuffLayers = new[] { 2, 3 } },
-            new AISnapshotEntry { Id = 8, CurrentHealth = 37, HealthTimestamp = 10.6, BuffLayers = Array.Empty<int>() }
+            new AISnapshotEntry { Id = 8, CurrentHealth = 37, HealthTimestamp = 10.6, MetadataVersion = 92, BuffLayers = Array.Empty<int>() }
         };
         CoopPacketReader Reader(byte[] bytes) => new(bytes, 0, bytes.Length);
         foreach (var count in new[] { 0, 1, 2 })
@@ -169,10 +172,14 @@ static class Program
             for (var i = 0; i < count; i++)
                 Check(parsed.Entries[i].Id == subset[i].Id && parsed.Entries[i].CurrentHealth == subset[i].CurrentHealth &&
                     parsed.Entries[i].HealthTimestamp == subset[i].HealthTimestamp &&
+                    parsed.Entries[i].MetadataVersion == subset[i].MetadataVersion &&
                     parsed.Entries[i].BuffLayers.SequenceEqual(subset[i].BuffLayers), "Health tail corrupted entry/buff data");
 
-            // Older hosts have buff layers but no health tail.
-            var legacy = Reader(bytes.Take(bytes.Length - count * sizeof(double)).ToArray());
+            var healthOnly = Reader(bytes.Take(bytes.Length - count * sizeof(int)).ToArray());
+            parsed.Deserialize(healthOnly);
+            Check(healthOnly.AvailableBytes == 0 && parsed.Entries.All(e => e.MetadataVersion == 0), "Health-only tail not readable");
+            // Older hosts have buff layers but neither optional tail.
+            var legacy = Reader(bytes.Take(bytes.Length - count * (sizeof(double) + sizeof(int))).ToArray());
             parsed.Deserialize(legacy);
             Check(legacy.AvailableBytes == 0 && parsed.Entries.All(e => e.HealthTimestamp == 0), "Legacy chunk not readable");
             // An older reader still consumes exactly the old prefix on a new message.
@@ -181,7 +188,7 @@ static class Program
             var oldEntries = new AISnapshotEntry[count];
             for (var i = 0; i < count; i++) oldEntries[i].Deserialize(prefix);
             for (var i = 0; i < count; i++) oldEntries[i].ReadBuffLayers(prefix);
-            Check(prefix.AvailableBytes == count * sizeof(double), "New fields inserted into legacy entry layout");
+            Check(prefix.AvailableBytes == count * (sizeof(double) + sizeof(int)), "New fields inserted into legacy entry layout");
         }
         var spawn = new AISpawnRpc { Entry = entries[0] };
         var spawnWriter = new NetDataWriter();
@@ -190,8 +197,8 @@ static class Program
         var spawnReader = Reader(spawnBytes);
         var parsedSpawn = new AISpawnRpc();
         parsedSpawn.Deserialize(spawnReader);
-        Check(spawnReader.AvailableBytes == 0 && parsedSpawn.Entry.HealthTimestamp == 10.5, "Spawn tail missing");
-        parsedSpawn.Deserialize(Reader(spawnBytes.Take(spawnBytes.Length - sizeof(double)).ToArray()));
+        Check(spawnReader.AvailableBytes == 0 && parsedSpawn.Entry.HealthTimestamp == 10.5 && parsedSpawn.Entry.MetadataVersion == 91, "Spawn tail missing");
+        parsedSpawn.Deserialize(Reader(spawnBytes.Take(spawnBytes.Length - sizeof(double) - sizeof(int)).ToArray()));
         Check(parsedSpawn.Entry.HealthTimestamp == 0 && parsedSpawn.Entry.BuffLayers.Length == 2, "Legacy spawn retained old timestamp");
     }
 
