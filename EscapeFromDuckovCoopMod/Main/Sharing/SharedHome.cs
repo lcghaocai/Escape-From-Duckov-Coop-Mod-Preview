@@ -111,6 +111,7 @@ public static class SharedHome
     public static void Tick()
     {
         SharedHomeCompatibility.Tick();
+        SharedHomeQuests.Tick();
         if (Guest && _pendingState != null && SharedHomeEntry.AtMainMenu)
             Apply(() => SharedHomeSave.Apply(_pendingState, false));
         SharedHomeEntry.Tick();
