@@ -1,4 +1,4 @@
-﻿// Escape-From-Duckov-Coop-Mod-Preview
+// Escape-From-Duckov-Coop-Mod-Preview
 // Copyright (C) 2025  Mr.sans and InitLoader's team
 //
 // This program is not a free software.
@@ -470,7 +470,8 @@ public class LootManager : MonoBehaviour
 
         if (posKey != 0)
         {
-            if (CoopSyncDatabase.Loot.TryGetByPositionKey(posKey, out var entry) && entry?.Inventory)
+            if (CoopSyncDatabase.Loot.TryGetByPositionKey(posKey, out var entry) && entry?.Inventory &&
+                (scene < 0 || entry.SceneIndex == scene))
             {
                 inv = entry.Inventory;
                 return true;
@@ -757,17 +758,20 @@ public class LootManager : MonoBehaviour
         // 先用稳定ID（主机用 _srvLootByUid；客户端用 _cliLootByUid）
         if (lootUid >= 0)
         {
-            if (CoopSyncDatabase.Loot.TryGetByLootUid(lootUid, out var byUid) && byUid?.Inventory)
+            if (CoopSyncDatabase.Loot.TryGetByLootUid(lootUid, out var byUid) && byUid?.Inventory &&
+                (scene < 0 || byUid.SceneIndex == scene))
                 return byUid.Inventory;
 
             if (IsServer)
             {
-                if (_srvLootByUid != null && _srvLootByUid.TryGetValue(lootUid, out inv) && inv)
+                if (_srvLootByUid != null && _srvLootByUid.TryGetValue(lootUid, out inv) && inv &&
+                    (!CoopSyncDatabase.Loot.TryGetByInventory(inv, out var entry) || scene < 0 || entry.SceneIndex == scene))
                     return inv;
             }
             else
             {
-                if (_cliLootByUid != null && _cliLootByUid.TryGetValue(lootUid, out inv) && inv)
+                if (_cliLootByUid != null && _cliLootByUid.TryGetValue(lootUid, out inv) && inv &&
+                    (!CoopSyncDatabase.Loot.TryGetByInventory(inv, out var entry) || scene < 0 || entry.SceneIndex == scene))
                     return inv;
             }
         }
