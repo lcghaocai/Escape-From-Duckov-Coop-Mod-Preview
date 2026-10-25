@@ -81,6 +81,7 @@ public class SceneNet : MonoBehaviour
     private bool _cliForceSpawnAtHost;
     private bool _cliHostReadyReceived;
     private bool _cliPendingPostLoadSnap;
+    private float _cliForceSpawnDeadline;
     private Vector3 _cliHostSpawnPosition;
     private Quaternion _cliHostSpawnRotation;
 
@@ -137,10 +138,19 @@ public class SceneNet : MonoBehaviour
         if (!IsServer && _cliForceSpawnAtHost && sceneLocationName == "OnPointerClick")
         {
             if (!_cliHostReadyReceived)
-                return; // 等待主机进入地图并广播当前位置
-
-            if (!Client_TrySnapToHostAnchor())
+            {
+                // 主机场景 ID 一直对不上/SCENE_READY 丢失时不能永久卡住：
+                // 超时后退回本地出生点，至少先让角色正常上报。
+                if (Time.unscaledTime < _cliForceSpawnDeadline)
+                    return;
+                _cliForceSpawnAtHost = false;
+                CoopLogSystem.WriteNetworkDiagnostic(
+                    $"[SCENE] SpawnTogether fallback: host ready not received for target='{sceneTargetId}'");
+            }
+            else if (!Client_TrySnapToHostAnchor())
+            {
                 return; // 角色未生成，延迟到下次再尝试
+            }
         }
 
         // 等出生点稳定一小段时间（只对当前场景计一次），避免角色刚 InitLevel 完还在旧坐标时上报。
@@ -444,6 +454,7 @@ public class SceneNet : MonoBehaviour
         sceneLocationName = message.LocationName ?? string.Empty;
 
         _cliForceSpawnAtHost = message.ForceSpawnAtHost && sceneLocationName == "OnPointerClick";
+        _cliForceSpawnDeadline = Time.unscaledTime + 5f;
         _cliHostReadyReceived = false;
         _cliPendingPostLoadSnap = _cliForceSpawnAtHost;
         _cliHostSpawnPosition = message.HostSpawnPosition;
@@ -477,14 +488,31 @@ public class SceneNet : MonoBehaviour
     {
         if (!_cliForceSpawnAtHost) return;
         if (sceneLocationName != "OnPointerClick") return;
-        if (!string.Equals(sceneTargetId, sceneId, StringComparison.OrdinalIgnoreCase)) return;
+        if (IsBaseScene(sceneId)) return;
+        if (!IsSpawnSceneMatch(sceneTargetId, sceneId))
+        {
+            CoopLogSystem.WriteNetworkDiagnostic(
+                $"[SCENE] SpawnTogether ignored host ready: target='{sceneTargetId}' host='{sceneId}'");
+            return;
+        }
         if (_cliHostReadyReceived) return;
 
         _cliHostReadyReceived = true;
         _cliHostSpawnPosition = pos;
         _cliHostSpawnRotation = rot;
+        CoopLogSystem.WriteNetworkDiagnostic(
+            $"[SCENE] SpawnTogether host ready: target='{sceneTargetId}' host='{sceneId}' pos={pos.x:0.0},{pos.y:0.0},{pos.z:0.0}");
 
         Client_TrySnapToHostAnchor();
+    }
+
+    private static bool IsSpawnSceneMatch(string targetSceneId, string hostSceneId)
+    {
+        if (string.IsNullOrEmpty(targetSceneId) || string.IsNullOrEmpty(hostSceneId)) return false;
+        if (string.Equals(targetSceneId, hostSceneId, StringComparison.OrdinalIgnoreCase)) return true;
+        // 目标场景和 active scene 可能一个带 _Main、一个不带，或者主场景/子场景命名不同。
+        return targetSceneId.StartsWith(hostSceneId, StringComparison.OrdinalIgnoreCase) ||
+               hostSceneId.StartsWith(targetSceneId, StringComparison.OrdinalIgnoreCase);
     }
 
     private bool Client_TrySnapToHostAnchor(bool markPostLoadApplied = false)
@@ -544,6 +572,7 @@ public class SceneNet : MonoBehaviour
         _srvGateSid = null;
         _sceneReadyPendingSid = null;
         _sceneReadyEarliestTime = 0f;
+        _cliForceSpawnDeadline = 0f;
         sceneVoteActive = false;
         sceneParticipantIds.Clear();
         sceneReady.Clear();
