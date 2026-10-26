@@ -449,7 +449,7 @@ namespace EscapeFromDuckovCoopMod;
         if (!context.IsServer || lm == null) return;
 
         var inv = lm.ResolveLootInv(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.Id.LootUid);
-        if (inv == null && rpc.PositionHint != Vector3.zero)
+        if (inv == null && rpc.Id.LootUid < 0 && rpc.PositionHint != Vector3.zero)
             lm.Server_TryResolveLootAggressive(rpc.Id.Scene, rpc.Id.PositionKey, rpc.Id.InstanceId, rpc.PositionHint,
                 out inv);
 

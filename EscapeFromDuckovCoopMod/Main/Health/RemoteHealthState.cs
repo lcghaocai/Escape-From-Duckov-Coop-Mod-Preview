@@ -20,6 +20,7 @@ internal sealed class RemoteHealthState : MonoBehaviour
         current = Mathf.Clamp(current, 0f, max);
         var maxChanged = !state.HasSnapshot || state.MaxHealth != max;
         var currentChanged = !state.HasSnapshot || state.CurrentHealth != current;
+        var tookDamage = state.HasSnapshot && current < state.CurrentHealth;
         state.MaxHealth = max;
         state.CurrentHealth = current;
         state.HasSnapshot = true;
@@ -28,6 +29,7 @@ internal sealed class RemoteHealthState : MonoBehaviour
         HealthTool.FI__current.SetValue(health, current);
         if (maxChanged) health.OnMaxHealthChange?.Invoke(health);
         if (currentChanged) health.OnHealthChange?.Invoke(health);
+        if (tookDamage) ShoulderSurfingCompat.NotifyReplicatedHurt(health);
         return true;
     }
 }

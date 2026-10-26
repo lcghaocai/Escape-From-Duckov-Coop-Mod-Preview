@@ -365,6 +365,10 @@ public sealed class LootSyncRegistry
         entry.PositionKey = posKey;
         entry.InstanceId = instanceId;
         entry.SceneIndex = sceneIndex;
+        // Corpses may be physically moved under MultiSceneCore. Their wire scene
+        // belongs to the map in which the host allocated the stable loot UID.
+        if (lootUid >= 0 && entry.LootUid < 0)
+            entry.ScopeSceneIndex = Duckov.Scenes.MultiSceneCore.MainScene?.buildIndex ?? SceneManager.GetActiveScene().buildIndex;
         entry.WorldPosition = worldPos;
         entry.IsWorldLoot = formulaBox || !LootboxDetectUtil.IsPrivateInventory(inventory);
 
@@ -533,6 +537,7 @@ public sealed class LootSyncEntry
     public int PositionKey { get; set; }
     public int InstanceId { get; set; }
     public int SceneIndex { get; set; }
+    public int ScopeSceneIndex { get; set; } = -1;
     public int LootUid { get; set; } = -1;
     public Vector3 WorldPosition { get; set; }
 }

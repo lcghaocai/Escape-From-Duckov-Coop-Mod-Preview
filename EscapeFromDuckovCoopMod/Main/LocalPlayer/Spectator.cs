@@ -227,6 +227,7 @@ public class Spectator : MonoBehaviour
         var target = _spectateList[_spectateIdx];
         // Changing the controlling character also hands local input to the remote replica.
         if (camera && camera.target != target) camera.SetTarget(target);
+        ShoulderSurfingCompat.SetSpectatorTarget(target);
     }
 
     public void EndSpectatorAndShowClosure(bool force = false)
@@ -262,6 +263,7 @@ public class Spectator : MonoBehaviour
             var camera = GameCamera.Instance;
             var main = CharacterMainControl.Main;
             if (camera && main && camera.target != main) camera.SetTarget(main);
+            ShoulderSurfingCompat.SetSpectatorTarget(main);
             _skipSpectatorForNextClosure = true;
             // Keep the native CharacterDieTask awaiting this settlement before it returns to base.
             await Duckov.UI.ClosureView.ShowAndReturnTask(damage, duration);

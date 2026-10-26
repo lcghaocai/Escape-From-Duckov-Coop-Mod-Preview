@@ -500,7 +500,7 @@ public class WeaponHandle
         var hasRemote = clientRemoteCharacters.TryGetValue(message.ShooterId, out var who) && who;
         if (message.AiId != 0)
         {
-            var ai = COOPManager.AI?.TryGetCharacter(message.AiId);
+            var ai = COOPManager.AI?.Client_ObserveFiringActor(message.AiId, message.MuzzlePosition);
             if (!ai) return; // 模型还没到，先不画枪线，避免“有枪线没有人”
         }
         else if (!hasRemote)

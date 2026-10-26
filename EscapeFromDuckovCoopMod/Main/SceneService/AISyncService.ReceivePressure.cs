@@ -13,6 +13,35 @@ public sealed partial class AISyncService
     private int _entityRecoveryRequests;
     private readonly Dictionary<int, double> _clientMetadataReceivedAt = new();
     private int _visibleSamples;
+    private int _fireMissingActors, _fireHiddenActors, _fireInactiveModels;
+    private float _nextFireVisibilityLog;
+
+    internal CharacterMainControl Client_ObserveFiringActor(int id, Vector3 position)
+    {
+        var actor = TryGetCharacter(id);
+        var model = actor ? actor.characterModel : null;
+        var hidden = actor && actor.Hidden;
+        if (!actor)
+        {
+            _fireMissingActors++;
+            if (IsClientWithinRange(position, DeactivationRadius))
+            {
+                Client_RequestEntityRecovery(id);
+                if (CoopSyncDatabase.AI.TryGet(id, out var entry) && entry != null)
+                    Client_EnsureReplica(entry);
+            }
+        }
+        else if (hidden) _fireHiddenActors++;
+        else if (!model || !model.gameObject.activeInHierarchy) _fireInactiveModels++;
+        else return actor;
+
+        if (Time.unscaledTime >= _nextFireVisibilityLog)
+        {
+            _nextFireVisibilityLog = Time.unscaledTime + 5f;
+            CoopLogSystem.WriteNetworkDiagnostic($"[AI][FireVisibility] id={id} actor={(bool)actor} model={(bool)model} hidden={hidden} modelActive={(model && model.gameObject.activeInHierarchy)} spawning={_clientReplicaSpawning.Contains(id)}");
+        }
+        return actor;
+    }
     private double _visibleTotalMs, _visibleMaxMs, _buildMaxMs;
 
     private void Client_TrackMetadata(int id)
@@ -31,8 +60,9 @@ public sealed partial class AISyncService
     }
     private void Client_LogQueueDiagnostics()
     {
-        CoopLogSystem.WriteNetworkDiagnostic($"[AI][ClientQueue] snapshots={_pendingSnapshotQueue.Count} spawnQueue={_clientReplicaSpawnQueue.Count} spawning={_clientReplicaSpawning.Count} visibleSamples={_visibleSamples} receiveToVisibleAvgMs={(_visibleSamples == 0 ? 0 : _visibleTotalMs / _visibleSamples):0.0} receiveToVisibleMaxMs={_visibleMaxMs:0.0} buildMaxMs={_buildMaxMs:0.0} entityRequests={_entityRecoveryRequests}");
+        CoopLogSystem.WriteNetworkDiagnostic($"[AI][ClientQueue] snapshots={_pendingSnapshotQueue.Count} spawnQueue={_clientReplicaSpawnQueue.Count} spawning={_clientReplicaSpawning.Count} visibleSamples={_visibleSamples} receiveToVisibleAvgMs={(_visibleSamples == 0 ? 0 : _visibleTotalMs / _visibleSamples):0.0} receiveToVisibleMaxMs={_visibleMaxMs:0.0} buildMaxMs={_buildMaxMs:0.0} entityRequests={_entityRecoveryRequests} fireMissingActors={_fireMissingActors} fireHiddenActors={_fireHiddenActors} fireInactiveModels={_fireInactiveModels}");
         _visibleSamples = _entityRecoveryRequests = 0;
+        _fireMissingActors = _fireHiddenActors = _fireInactiveModels = 0;
         _visibleTotalMs = _visibleMaxMs = _buildMaxMs = 0;
     }
 
@@ -111,6 +141,7 @@ public sealed partial class AISyncService
     }
     private void ResetReceivePressure()
     {
+        _fireMissingActors = _fireHiddenActors = _fireInactiveModels = 0; _nextFireVisibilityLog = 0;
         _clientMetadataReceivedAt.Clear(); _visibleSamples = 0; _visibleTotalMs = _visibleMaxMs = _buildMaxMs = 0;
         _receivePressure.Clear(); _clientEntityRecoveryLimiter.Clear(); _serverEntityRecoveryLimiters.Clear();
         _serverEntityRecoveries.Clear(); _essentialSnapshots.Clear(); _nextPressureReport = 0; _entityRecoveryRequests = 0;

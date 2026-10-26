@@ -424,6 +424,9 @@ public class LootManager : MonoBehaviour
                     }
         }
 
+        if (lootUid >= 0 && entryByInventory != null && entryByInventory.ScopeSceneIndex >= 0)
+            scene = entryByInventory.ScopeSceneIndex;
+
         return new LootIdentifier
         {
             Scene = scene,
@@ -734,22 +737,17 @@ public class LootManager : MonoBehaviour
         // 先用稳定ID（主机用 _srvLootByUid；客户端用 _cliLootByUid）
         if (lootUid >= 0)
         {
-            if (CoopSyncDatabase.Loot.TryGetByLootUid(lootUid, out var byUid) && byUid?.Inventory &&
-                (scene < 0 || byUid.SceneIndex == scene))
-                return byUid.Inventory;
+            if (CoopSyncDatabase.Loot.TryGetByLootUid(lootUid, out var byUid) && byUid?.Inventory)
+                return MatchesLootScope(scene, byUid.ScopeSceneIndex) ? byUid.Inventory : null;
 
-            if (IsServer)
-            {
-                if (_srvLootByUid != null && _srvLootByUid.TryGetValue(lootUid, out inv) && inv &&
-                    (!CoopSyncDatabase.Loot.TryGetByInventory(inv, out var entry) || scene < 0 || entry.SceneIndex == scene))
-                    return inv;
-            }
-            else
-            {
-                if (_cliLootByUid != null && _cliLootByUid.TryGetValue(lootUid, out inv) && inv &&
-                    (!CoopSyncDatabase.Loot.TryGetByInventory(inv, out var entry) || scene < 0 || entry.SceneIndex == scene))
-                    return inv;
-            }
+            var byId = IsServer ? _srvLootByUid : _cliLootByUid;
+            if (byId.TryGetValue(lootUid, out inv) && inv &&
+                CoopSyncDatabase.Loot.TryGetByInventory(inv, out var entry) &&
+                entry.LootUid == lootUid && MatchesLootScope(scene, entry.ScopeSceneIndex))
+                return inv;
+
+            // A missing corpse must not fall through to another box at the same position.
+            return null;
         }
 
         // 回落到 scene/posKey/iid 三元定位
@@ -757,6 +755,19 @@ public class LootManager : MonoBehaviour
             return inv;
 
         return null;
+    }
+
+    private static bool MatchesLootScope(int requested, int scope)
+    {
+        if (requested < 0) return true;
+        if (scope < 0) return false;
+        if (requested == scope) return true;
+        var requestedScene = SceneManager.GetSceneByBuildIndex(requested);
+        var scopeScene = SceneManager.GetSceneByBuildIndex(scope);
+        return requestedScene.IsValid() && requestedScene.isLoaded &&
+               scopeScene.IsValid() && scopeScene.isLoaded &&
+               !string.IsNullOrEmpty(requestedScene.name) && !string.IsNullOrEmpty(scopeScene.name) &&
+               Spectator.AreSameMap(requestedScene.name, scopeScene.name);
     }
 
     public bool Server_IsLootMuted(Inventory inv)
