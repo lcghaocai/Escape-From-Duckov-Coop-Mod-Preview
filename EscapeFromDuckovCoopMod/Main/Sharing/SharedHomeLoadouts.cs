@@ -48,6 +48,7 @@ internal static class SharedHomeLoadouts
         data.Save("character", ItemTreeData.FromItem(item));
         data.Save("face", LevelManager.Instance.CustomFaceManager.LoadMainCharacterSetting());
         data.Save("created", _ready);
+        SharedHomePetInventory.AddReport(data);
         if (ES3File.cachedFiles.TryGetValue(SavesSystem.CurrentFilePath, out var cache))
             foreach (var key in DeathKeys)
                 if (cache.KeyExists(key)) data.Save(key, cache.Load(key));
@@ -73,8 +74,10 @@ internal static class SharedHomeLoadouts
             _requested = _ready = false;
             _pending = _lastSent = null;
         }
+        if (!SharedHomePetInventory.NativeReady) return;
         if (!_requested)
         {
+            SharedHomePetInventory.CapturePersonal();
             if (!Personal.ContainsKey(context)) Personal[context] = ItemTreeData.FromItem(character.CharacterItem);
             var hello = new ES3File(false);
             hello.Save("identity", LocalIdentity());
@@ -97,7 +100,8 @@ internal static class SharedHomeLoadouts
             }
             ReloadDeaths();
             RestoreItem(incoming.Load<ItemTreeData>("character"), character.CharacterItem, _generation, false,
-                incoming.Load<bool>("createCharacter")).Forget();
+                incoming.Load<bool>("createCharacter"),
+                incoming.KeyExists(SharedHomePetInventory.ReportKey) ? incoming.Load<InventoryData>(SharedHomePetInventory.ReportKey) : null).Forget();
         }
         if (_watched != character.CharacterItem)
         {
@@ -109,7 +113,7 @@ internal static class SharedHomeLoadouts
     }
     internal static void Flush()
     {
-        if (!SharedHome.Guest || !_ready || Restoring || !CharacterMainControl.Main?.CharacterItem) return;
+        if (!SharedHome.Guest || !_ready || Restoring || SharedHomePetInventory.Loading || !CharacterMainControl.Main?.CharacterItem) return;
         var bytes = Serialize(CharacterMainControl.Main.CharacterItem);
         _nextReport = Time.unscaledTime + (_changed ? .25f : 1f);
         _changed = false;
@@ -145,9 +149,18 @@ internal static class SharedHomeLoadouts
                 if (tree?.entries == null || tree.entries.Count == 0 || tree.entries.Count > 10000) return;
                 var created = NewPlayers.Contains(sender);
                 if (created && (!report.Load<bool>("created") || !report.KeyExists("face"))) return;
+                InventoryData pet = null;
+                if (report.KeyExists(SharedHomePetInventory.ReportKey))
+                {
+                    pet = report.Load<InventoryData>(SharedHomePetInventory.ReportKey);
+                    SharedHomePetInventory.Validate(pet);
+                }
                 var firstReport = !LastReports.ContainsKey(sender);
                 LastReports[sender] = bytes;
                 SavesSystem.Save(ContextKey(key, context), bytes);
+                // A missing pet field (old client/loading/challenge map) must not
+                // replace the last good snapshot. Empty snapshots do replace it.
+                if (pet != null) SavesSystem.Save(key + SharedHomePetInventory.SaveSuffix, pet);
                 if (report.KeyExists("face")) SavesSystem.Save(key + "/Face", report.Load<CustomFaceSettingData>("face"));
                 var deaths = new ES3File(false);
                 foreach (var deathKey in DeathKeys)
@@ -183,6 +196,9 @@ internal static class SharedHomeLoadouts
             reply.Save("face", Duckov.Utilities.GameplayDataSettings.CustomFaceData.DefaultPreset.settings);
         }
         else if (SavesSystem.KeyExisits(key + "/Face")) reply.Save("face", SavesSystem.Load<CustomFaceSettingData>(key + "/Face"));
+        reply.DeleteKey(SharedHomePetInventory.ReportKey);
+        var pet = SavesSystem.Load<InventoryData>(key + SharedHomePetInventory.SaveSuffix);
+        if (pet != null) reply.Save(SharedHomePetInventory.ReportKey, pet);
         reply.Save("context", context);
         reply.Save("createCharacter", create);
         foreach (var deathKey in DeathKeys) reply.DeleteKey(deathKey);
@@ -196,7 +212,7 @@ internal static class SharedHomeLoadouts
         SharedHome.SendPrivate(5, reply.LoadRawBytes(), sender);
     }
     private static bool ValidContext(string context) => context != null && context.Length <= 128 && context.StartsWith("MainCharacterItemData");
-    private static async UniTaskVoid RestoreItem(ItemTreeData data, Item target, int generation, bool personal, bool create = false)
+    private static async UniTaskVoid RestoreItem(ItemTreeData data, Item target, int generation, bool personal, bool create = false, InventoryData pet = null)
     {
         try
         {
@@ -204,17 +220,26 @@ internal static class SharedHomeLoadouts
             if (generation != _generation || !target) return;
             if (create) await SharedHomeCharacterCreation.Create(() => generation == _generation && SharedHome.Guest);
             if (generation != _generation || !create && !target) return;
+            if (pet != null)
+            {
+                if (!await SharedHomePetInventory.Restore(pet, () => generation == _generation && (personal || SharedHome.Guest), personal)) return;
+            }
+            else if (!personal)
+                CoopLogSystem.WriteNetworkDiagnostic("[SharedHome][Pet] legacy save has no pet snapshot; retaining current inventory");
+            if (generation != _generation) return;
             if (!personal) { _ready = true; _changed = true; Flush(); }
         }
-        catch (Exception e) when (create && generation == _generation)
+        catch (Exception e) when (!personal && generation == _generation)
         {
-            Debug.LogError($"[SharedHome] Character creation failed: {e}");
+            Debug.LogError($"[SharedHome] Character/pet restore failed: {e}");
             NetService.Instance.StopNetwork();
             MModUI.ShowTip(CoopLocalization.Get("net.sharedHome.entryFailed"));
         }
         finally
         {
             if (personal) Restoring = false;
+            else if (generation == _generation && !_ready)
+                _requested = false; // Retry if a scene change cancelled the asynchronous restore.
         }
     }
     internal static void PeerDisconnected(NetPeer peer)
@@ -239,6 +264,7 @@ internal static class SharedHomeLoadouts
         Unwatch();
         Personal.TryGetValue(_context ?? string.Empty, out var personal);
         Personal.Clear();
+        var personalPet = SharedHomePetInventory.TakePersonal();
         _context = null;
         _pending = _lastSent = null;
         _requested = _ready = _changed = false;
@@ -248,7 +274,7 @@ internal static class SharedHomeLoadouts
         if (personal != null && CharacterMainControl.Main?.CharacterItem)
         {
             Restoring = true;
-            RestoreItem(personal, CharacterMainControl.Main.CharacterItem, _generation, true).Forget();
+            RestoreItem(personal, CharacterMainControl.Main.CharacterItem, _generation, true, pet: personalPet).Forget();
         }
     }
 }
