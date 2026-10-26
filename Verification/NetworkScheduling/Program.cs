@@ -12,6 +12,7 @@ static partial class Program
 
     public static void Main()
     {
+        Test("Pick All and concurrent distinct slots progress without allowing same-slot replays", IndependentLootTakes);
         Test("take request/receipt/denial and legacy wire boundaries", LootTakeWire);
         Test("transient audio expires, stays bounded and preserves transactions", TransientAudioQueue);
         Test("take delivery handles replay, reentrancy, failure and delayed receipts", TakeDeliveryExactlyOnce);

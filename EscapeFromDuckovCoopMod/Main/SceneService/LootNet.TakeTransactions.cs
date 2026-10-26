@@ -23,6 +23,7 @@ public partial class LootNet
         internal Item Item;
         internal LootTakeOkRpc Result;
     }
+    private float _nextTakeWaitLog;
     private readonly Dictionary<uint, TakeDestination> _takes = new();
     private readonly TakeDeliveryLedger _takeDelivery = new();
     private readonly Dictionary<uint, NetPeer> _takeReceiptPeers = new();
@@ -41,13 +42,18 @@ public partial class LootNet
         if (connectedPeer == null || !_cliInitializedLoot.Contains(source) || _takes.Count >= 32)
         {
             split?.TrySetResult(null);
+            if (Time.unscaledTime >= _nextTakeWaitLog)
+            {
+                _nextTakeWaitLog = Time.unscaledTime + 2;
+                CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take waiting peer={connectedPeer != null} initialized={_cliInitializedLoot.Contains(source)} pending={_takes.Count} type={item.TypeID}");
+            }
             Client_RequestLootState(source, true);
             return true;
         }
         var token = _nextLootToken++;
         var request = new LootTakeRequestRpc
         {
-            Id = LootManagerInstance.BuildLootIdentifier(source), Token = token, Position = source.GetIndex(item), PreferDest = position,
+            Id = _cliAuthoritativeLootIds.TryGetValue(source, out var hostId) ? hostId : LootManagerInstance.BuildLootIdentifier(source), Token = token, Position = source.GetIndex(item), PreferDest = position,
             Protocol = 1, ExpectedVersion = GetCurrentVersion(source), ExpectedType = item.TypeID, ExpectedStack = item.StackCount,
             Count = count > 0 && count < item.StackCount ? count : 0
         };
@@ -55,6 +61,7 @@ public partial class LootNet
         _takes[token] = new TakeDestination { Source = item, Inventory = destination, Position = position, Slot = slot,
             Merge = merge, Use = use, Split = split, Peer = connectedPeer, Request = request, RetryAt = Time.unscaledTime + 2f };
         CoopTool.SendRpc(in request);
+        CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take requested token={token} scene={request.Id.Scene} key={request.Id.PositionKey} uid={request.Id.LootUid} slot={request.Position} version={request.ExpectedVersion} type={request.ExpectedType} stack={request.ExpectedStack}");
         return true;
     }
     internal UniTask<Item> SplitWorldLoot(Item item, int count)
@@ -102,15 +109,22 @@ public partial class LootNet
         if (_takeEscrow.TryGetValue(key, out var previous))
         { CoopTool.SendRpcTo(peer, in previous.Result); return; }
         if (_takeHighWater.TryGetValue(peer, out var highest) && request.Token <= highest)
-        { SendTakeDenied(peer, request); return; }
+        { SendTakeDenied(peer, request, "old_token"); return; }
         _takeHighWater[peer] = request.Token;
         var inv = LootManagerInstance.ResolveLootInv(request.Id.Scene, request.Id.PositionKey, request.Id.InstanceId, request.Id.LootUid);
         var item = inv && request.Position >= 0 && request.Position < inv.Capacity ? inv.GetItemAt(request.Position) : null;
-        if (!inv || !LootboxDetectUtil.IsLootboxInventory(inv) || SharedHomeStorage.IsShared(inv) || !item || IsQuestTagged(item, inv) ||
-            request.ExpectedVersion != GetCurrentVersion(inv) || item.TypeID != request.ExpectedType || item.StackCount != request.ExpectedStack ||
-            request.Count < 0 || request.Count >= item.StackCount || request.Count > 0 && !item.Stackable ||
-            _takeEscrow.Keys.Count(k => k.Peer == peer) >= 32)
-        { SendTakeDenied(peer, request); return; }
+        var reason = !inv || !LootboxDetectUtil.IsLootboxInventory(inv) ? "no_inv" :
+            SharedHomeStorage.IsShared(inv) ? "shared_storage" : !item ? "no_item" :
+            IsQuestTagged(item, inv) ? "quest_item" :
+            !_takeRevisions.CanTake(inv, request.Position, request.ExpectedVersion, GetCurrentVersion(inv)) ? "slot_changed" :
+            item.TypeID != request.ExpectedType || item.StackCount != request.ExpectedStack ? "item_changed" :
+            request.Count < 0 || request.Count >= item.StackCount || request.Count > 0 && !item.Stackable ? "invalid_count" :
+            _takeEscrow.Keys.Count(k => k.Peer == peer) >= 32 ? "escrow_full" : null;
+        if (reason != null)
+        {
+            SendTakeDenied(peer, request, reason, inv ? GetCurrentVersion(inv) : -1);
+            return;
+        }
 
         var applying = _serverApplyingLoot;
         _serverApplyingLoot = true;
@@ -140,6 +154,7 @@ public partial class LootNet
             BroadcastLootDelta(inv, request.Position, request.Count > 0 ? item.TypeID : -1,
                 request.Count > 0 ? item.StackCount : 0, request.Count == 0, version);
             CoopTool.SendRpcTo(peer, in accepted.Result);
+            CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take accepted token={request.Token} slot={request.Position} version={version}");
         }
         catch (Exception e)
         {
@@ -148,9 +163,10 @@ public partial class LootNet
         }
         finally { _serverApplyingLoot = applying; }
     }
-    private void SendTakeDenied(NetPeer peer, LootTakeRequestRpc request)
+    private void SendTakeDenied(NetPeer peer, LootTakeRequestRpc request, string reason = "mutation_failed", int currentVersion = -1)
     {
-        var result = new LootTakeOkRpc { Id = request.Id, Token = request.Token, Slot = request.Position, Accepted = false };
+        CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take rejected token={request.Token} reason={reason} scene={request.Id.Scene} key={request.Id.PositionKey} uid={request.Id.LootUid} slot={request.Position} expectedVersion={request.ExpectedVersion} currentVersion={currentVersion}");
+        var result = new LootTakeOkRpc { Id = request.Id, Token = request.Token, Slot = request.Position, Accepted = false, Reason = reason };
         CoopTool.SendRpcTo(peer, in result);
     }
     public void Client_OnLootTakeOk(LootTakeOkRpc result)
@@ -169,7 +185,7 @@ public partial class LootNet
             pending.Split?.TrySetResult(null);
             var source = pending.Source ? pending.Source.InInventory : null;
             if (source) Client_RequestLootState(source, true);
-            CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take denied token={result.Token} slot={result.Slot}; refreshing source");
+            CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take denied token={result.Token} slot={result.Slot} reason={result.Reason ?? "legacy_or_unknown"}; refreshing source");
             return;
         }
         pending.Result = result;
@@ -243,6 +259,7 @@ public partial class LootNet
     {
         _takes.Remove(token);
         _takeDelivery.Finish(token, true);
+        CoopLogSystem.WriteNetworkDiagnostic($"[LOOT] take delivered token={token} type={pending.Result.TypeId}");
         _takeReceiptPeers[token] = pending.Peer;
         if (networkStarted && pending.Peer == connectedPeer) SendTakeReceipt(token);
         if (pending.Use && pending.Granted && CharacterMainControl.Main) CharacterMainControl.Main.UseItem(pending.Granted);

@@ -42,6 +42,8 @@ namespace EscapeFromDuckovCoopMod;
     private readonly Dictionary<int, bool> _cliLootVisibility = new();
     private readonly Dictionary<Item, string> _cliSlotOrigins = new();
     private readonly LootPutReceipts _cliPutReceipts = new();
+    private readonly LootTakeRevisions<Inventory> _takeRevisions = new();
+    private readonly Dictionary<Inventory, LootIdentifier> _cliAuthoritativeLootIds = new(new InventoryRefEq());
     private readonly HashSet<Inventory> _cliInitializedLoot = new(new InventoryRefEq());
 
     internal bool Client_WaitingForLootState(Inventory inv) => !IsServer && networkStarted && inv &&
@@ -99,6 +101,8 @@ namespace EscapeFromDuckovCoopMod;
         _cliPendingPut.Clear();
         _cliPutReceipts.Clear();
         _cliInitializedLoot.Clear();
+        _takeRevisions.Clear();
+        _cliAuthoritativeLootIds.Clear();
         _cliLootDenyRetry.Clear();
         _warehouseChanges.Clear();
         _flushingWarehouse = false;
@@ -489,6 +493,7 @@ namespace EscapeFromDuckovCoopMod;
         {
             var item = inv.GetItemAt(i);
             if (item == null || IsQuestTagged(item)) continue;
+            if (!SharedHomeStorage.IsShared(inv)) _takeRevisions.Observe(inv, i, GetCurrentVersion(inv));
             slots.Add(new LootSlotSnapshot
             {
                 Slot = i,
@@ -946,6 +951,7 @@ namespace EscapeFromDuckovCoopMod;
                 if (rpc.IsSnapshot)
                 {
                     _cliInitializedLoot.Add(inv);
+                    _cliAuthoritativeLootIds[inv] = rpc.Id;
                     _cliLootDenyRetry.Remove(inv);
                     _cliVersions.SnapshotReceived(inv);
                 }
@@ -1194,6 +1200,7 @@ namespace EscapeFromDuckovCoopMod;
             Delta = delta
         };
 
+        if (!SharedHomeStorage.IsShared(inv)) _takeRevisions.Changed(inv, slot, rpc.Version);
         if (_srvViewers.TryGetValue(inv, out var viewers) && viewers.Count > 0)
         {
             CoopTool.SendRpcToPeers(viewers, in rpc);

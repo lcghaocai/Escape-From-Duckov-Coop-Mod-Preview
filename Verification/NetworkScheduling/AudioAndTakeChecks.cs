@@ -1,5 +1,27 @@
 static partial class Program
 {
+    private static void IndependentLootTakes()
+    {
+        var revisions = new LootTakeRevisions<string>();
+        for (var i = 0; i < 20; i++) revisions.Observe("box", i, 10);
+        // Pick All queues the same observed container revision for every slot.
+        // Each successful take changes only its own slot and advances the container.
+        for (var i = 0; i < 20; i++)
+        {
+            Check(revisions.CanTake("box", i, 10, 10 + i), "Unrelated prior take blocked this slot");
+            revisions.Changed("box", i, 11 + i);
+            Check(!revisions.CanTake("box", i, 10, 11 + i), "Second guest took an already changed slot");
+        }
+        revisions.Changed("box", 0, 31); // Identical type/count replaced in same slot.
+        Check(!revisions.CanTake("box", 0, 30, 31), "Same-looking replacement accepted from stale preview");
+        Check(revisions.CanTake("box", 0, 31, 31), "Refreshed slot remained blocked");
+        Check(!revisions.CanTake("box", 0, 32, 31), "Future revision accepted");
+        Check(!revisions.CanTake("other", 0, 31, 31), "Container identity leaked");
+        revisions.Observe("box", 19, 31);
+        Check(revisions.CanTake("box", 19, 30, 31), "Read-only snapshot changed a slot revision");
+        revisions.Clear();
+        Check(!revisions.CanTake("box", 0, 31, 31), "Scene reset reused old slot history");
+    }
     private static void TransientAudioQueue()
     {
         var freed = new HashSet<int>();
@@ -37,10 +59,13 @@ static partial class Program
             reader = new CoopPacketReader(bytes, 0, bytes.Length - 18); decoded = new(); decoded.Deserialize(reader);
             Check(reader.AvailableBytes == 0 && decoded.Protocol == 0, "Legacy request masqueraded as a confirmed take");
         }
-        var denial = new LootTakeOkRpc { Token = 13, Slot = 4, Accepted = false, Version = 11 };
+        var denial = new LootTakeOkRpc { Token = 13, Slot = 4, Accepted = false, Version = 11, Reason = "slot_changed" };
         var denyWriter = new NetDataWriter(); denial.Serialize(denyWriter); var denyBytes = denyWriter.CopyData();
         var denyReader = new CoopPacketReader(denyBytes, 0, denyBytes.Length); var decodedDeny = new LootTakeOkRpc(); decodedDeny.Deserialize(denyReader);
-        Check(!decodedDeny.Accepted && decodedDeny.Token == 13 && decodedDeny.Version == 11 && denyReader.AvailableBytes == 0, "Denial cannot resolve matching pending request");
+        Check(!decodedDeny.Accepted && decodedDeny.Token == 13 && decodedDeny.Version == 11 && decodedDeny.Reason == "slot_changed" && denyReader.AvailableBytes == 0, "Denial cannot resolve matching pending request");
+        denyReader = new CoopPacketReader(denyBytes, 0, 37); // v1 confirmation prefix without a reason tail.
+        decodedDeny = new(); decodedDeny.Deserialize(denyReader);
+        Check(!decodedDeny.Accepted && decodedDeny.Reason == null && denyReader.AvailableBytes == 0, "Legacy denial tail is not optional");
     }
     private static void TakeDeliveryExactlyOnce()
     {
