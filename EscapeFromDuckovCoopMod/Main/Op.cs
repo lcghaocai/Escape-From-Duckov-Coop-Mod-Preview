@@ -94,6 +94,7 @@ public enum Op : byte
     CORPSE_SPAWN_REQUEST = 196,
     SHARED_HOME = 197,
     SCENE_JOIN = 198,
+    CORPSE_CARRY = 201, // Host-authorized corpse carrier and pose updates.
     RECEIVE_PRESSURE = 200, // Advisory per-client application receive pressure.
     PLAYER_BUFF_SNAPSHOT = 199, // Ordered reconciliation alongside player buff deltas.
 

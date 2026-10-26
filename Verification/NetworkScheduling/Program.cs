@@ -12,6 +12,8 @@ static partial class Program
 
     public static void Main()
     {
+        Test("corpse carry lease rejects competing/stale owners and recovers after timeout", CorpseCarryOwnership);
+        Test("corpse carry wire preserves phases, identity and pose", CorpseCarryWire);
         Test("Pick All and concurrent distinct slots progress without allowing same-slot replays", IndependentLootTakes);
         Test("take request/receipt/denial and legacy wire boundaries", LootTakeWire);
         Test("transient audio expires, stays bounded and preserves transactions", TransientAudioQueue);

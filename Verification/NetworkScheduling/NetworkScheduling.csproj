@@ -32,6 +32,7 @@
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/AI/ReceivePressureRpc.cs" Link="Production/ReceivePressureRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootIdentifier.cs" Link="Production/LootIdentifier.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootTakeRequestRpc.cs" Link="Production/LootTakeRequestRpc.cs" />
+    <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/CorpseCarryRpc.cs" Link="Production/CorpseCarryRpc.cs" />
     <Compile Include="../../EscapeFromDuckovCoopMod/Net/Rpc/Messages/Loot/LootTakeOkRpc.cs" Link="Production/LootTakeOkRpc.cs" />
   </ItemGroup>
 </Project>

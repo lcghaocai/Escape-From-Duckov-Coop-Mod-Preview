@@ -96,6 +96,7 @@ public class DeadLootBox : MonoBehaviour
             CorpseInspection.Initialize(box, useTombPrefab, playerId);
 
             CoopSyncDatabase.Loot.Register(box, inv, lootUid);
+            CorpseCarrySync.Register(box, lootUid);
 
             // 用主机广播的 pos 注册 posKey → inv（旧兜底仍保留）
             var dict = InteractableLootbox.Inventories;
@@ -236,6 +237,7 @@ public class DeadLootBox : MonoBehaviour
             var inv = box.Inventory;
             if (inv) LootManager.Instance._srvLootByUid[lootUid] = inv;
             CoopSyncDatabase.Loot.Register(box, inv, lootUid);
+            CorpseCarrySync.Register(box, lootUid);
             if (inv) CoopSyncDatabase.Loot.SetLootUid(inv, lootUid);
 
             CorpseInspection.Initialize(box, useTombPrefab, corpseOwnerId);
@@ -274,6 +276,7 @@ public class DeadLootBox : MonoBehaviour
             message.Rotation = pair.Key.transform.rotation;
             message.PlayerId = string.Empty;
             CoopTool.SendRpcTo(peer, in message);
+            CorpseCarrySync.Replay(peer, pair.Key);
         }
     }
 }

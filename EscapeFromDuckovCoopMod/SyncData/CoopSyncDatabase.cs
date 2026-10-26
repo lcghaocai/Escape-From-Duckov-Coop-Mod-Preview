@@ -388,6 +388,29 @@ public sealed class LootSyncRegistry
         if (loader) _byLoader[loader] = entry;
     }
 
+    // Moving a corpse changes its positional fallback, never its stable UID or map scope.
+    internal void UpdatePosition(InteractableLootbox box)
+    {
+        if (!box || !_byInstanceId.TryGetValue(box.GetInstanceID(), out var entry)) return;
+        var key = LootManager.ComputeLootKeyFromPos(box.transform.position);
+        if (key != entry.PositionKey)
+        {
+            if (_byPositionKey.TryGetValue(entry.PositionKey, out var previous) && ReferenceEquals(previous, entry))
+                _byPositionKey.Remove(entry.PositionKey);
+            if (key != 0 && !_byPositionKey.ContainsKey(key)) _byPositionKey[key] = entry;
+            var inventories = InteractableLootbox.Inventories;
+            if (inventories != null && entry.Inventory)
+            {
+                if (inventories.TryGetValue(entry.PositionKey, out var inventory) && inventory == entry.Inventory)
+                    inventories.Remove(entry.PositionKey);
+                if (!inventories.ContainsKey(key)) inventories[key] = entry.Inventory;
+            }
+            entry.PositionKey = key;
+        }
+        entry.WorldPosition = box.transform.position;
+        entry.SceneIndex = box.gameObject.scene.buildIndex;
+    }
+
     public void RegisterLoader(LootBoxLoader loader)
     {
         if (!loader) return;

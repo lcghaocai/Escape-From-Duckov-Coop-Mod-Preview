@@ -63,6 +63,7 @@ public static class RpcRegistry
         Register<EnvExitSnapshotRpc>(RPCEnvironment.HandleExitSnapshot);
         Register<EnvDestructibleHealthReportRpc>(RPCEnvironment.HandleDestructibleHealthReport);
         Register<DeadLootSpawnRpc>(RPCLoot.HandleDeadLootSpawn);
+        Register<CorpseCarryRpc>(CorpseCarrySync.Handle);
         Register<CorpseInventoryRpc>(RPCLoot.HandleCorpseInventory);
         Register<CorpseSpawnRequestRpc>(RPCLoot.HandleCorpseSpawnRequest);
         Register<SharedHomeRpc>(SharedHome.Handle);
